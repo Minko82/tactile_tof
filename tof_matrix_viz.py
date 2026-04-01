@@ -2,7 +2,7 @@
 # Posted by Zephyr, modified by community. See post 'Timeline' for change history
 # Retrieved 2026-03-30, License - CC BY-SA 4.0
 
-
+import time
 import serial
 import numpy as np
 import matplotlib.pyplot as plt
@@ -84,8 +84,9 @@ def update(frame):
             if len(raw_lines) == 8:
                 # Update the matrix
                 data_matrix = np.array(raw_lines)
+                formatted = np.array2string(data_matrix, separator=' ', precision=2, floatmode="fixed").replace("\n", ",")
                 if RECORD_PATH:
-                    new_df = pd.concat([new_df, pd.DataFrame([[datetime.now(), data_matrix]], columns=['time_stamp', 'data'])], ignore_index=True)
+                    new_df = pd.concat([new_df, pd.DataFrame([[datetime.now().time(), formatted]], columns=['time_stamp', 'data'])], ignore_index=True)
                     new_df.to_csv(RECORD_PATH, index=False)
                 # Update the image data
                 im.set_data(data_matrix)

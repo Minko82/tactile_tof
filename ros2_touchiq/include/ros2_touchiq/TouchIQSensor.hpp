@@ -1,12 +1,14 @@
 #include <boost/asio.hpp>
 #include <iostream>
-#include <cstio>
+#include <cstdio>
 namespace touch_iq_sensor {
+
 	class TouchIQSensor {
 		public:
 			TouchIQSensor(std::string port, unsigned int baud);
 		private:
-			asio::serial_port* sp;
-      asio::serial_port* configSP();
-	}
+		  //bool configured;
+      //boost::asio::serial_port sp_;
+      //boost::asio::serial_port configSP();
+	};
 }

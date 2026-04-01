@@ -1,5 +1,5 @@
 #include "rclcpp/rclcpp.hpp"
-#include "rclcpp/Node.hpp"
+#include "rclcpp/node.hpp"
 #include <cstdio>
 #include "ros2_touchiq/TouchIQSensor.hpp"
 namespace touch_iq_node {
@@ -12,7 +12,7 @@ namespace touch_iq_node {
       ros2_touchiq::TouchIQSensor touch_iq_sensor_;
 
       void timer_callback();
-  }
+  };
 
 
 }
