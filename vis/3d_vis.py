@@ -19,6 +19,7 @@ SERIAL_PORT = args_cli.port
 BAUD_RATE = args_cli.baud
 MAX_DISTANCE_MM = args_cli.max_distance
 RECORD_PATH = args_cli.record_path
+
 if not SERIAL_PORT:
     raise AssertionError("you must provide a port val.; for example, --port /dev/ttyACM0")
 else:
@@ -34,30 +35,44 @@ try:
 except Exception as e:
     print(f"Error connecting to serial port: {e}")
     exit()
-#while True:
-#    try:
-#        line = ser.readline().decode('utf-8').strip()
-#        # Only process lines that contain data (look for digits)
-#        print(line)
-#        time = int(line.split(",")[0].strip("{time: "))
-#        data = ast.literal_eval(line.split("data: ")[1].strip("}"))
-#        print(time)
-#        print(data)
-#        ser.reset_input_buffer()
-#    except KeyboardInterrupt:
-#            exit()
- 
-def test():
+
+red_blue_map = {}
+low = 18
+high = 37
+for i, val in enumerate(range(low, high)):
+    print(val)
+    t = i / (high - low)  
+    r = int(255 * (1 - t))
+    b = int(255 * t)
+    red_blue_map[val] = (r, 0, b)
+
+def generate_current_heatmap(surface, data_arr_2d):
+    global red_blue_map
+    side_length = 50
+    loc_x = 0
+    loc_y = 0
+    for element in data_arr_2d.flat:
+        pos = (loc_x * side_length, loc_y * side_length)
+        print(red_blue_map[element])
+        pg.draw.rect(surface, (red_blue_map[element]), pg.Rect(loc_x * side_length + 4, loc_y * side_length + 4, side_length - 4, side_length - 4))
+        pg.display.flip()
+        if loc_x == 7:
+            loc_x = 0
+            loc_y += 1
+        else:
+            loc_x += 1
+
+def main():
     pg.init()
     screen = pg.display.set_mode((1423, 989), pg.SHOWN)
     image_path = "/home/mateo/code/correll_ws/tactile_tof/touchiq_mount_cad.png"
     image = pg.image.load(image_path)
-    pg.display.set_caption("TouchIQ 3d Visualization")
+    pg.display.set_caption( "TouchIQ 3d Visualization")
     pg.mouse.set_visible(False)
-    background = pg.Surface(screen.get_size())
-    if pg.font:
-        font = pg.font.Font(None, 64)
-        text = font.render("Pummel The Chimp, And Win $$$", True, (10, 10, 10))
+    background = pg.Surface (screen.get_size())
+    if pg.font:             
+        font = pg.font.Font (None, 64)
+        text = font.render( "Pummel The Chimp, And Win $$$", True, (10, 10, 10))
         textpos = text.get_rect(centerx=background.get_width() / 2, y=10)
         background.blit(text, textpos)
     screen.blit(background, (0, 0))
@@ -73,31 +88,10 @@ def test():
         ser.reset_input_buffer()
         data = np.array(data)
         data = data.reshape(8, 8)
-        print(data)
         screen.blit(image, (0, 0))
-        draw_circles(screen, data)
+        generate_current_heatmap(screen, data)
         pg.display.flip()
-        pass
-
-def draw_circles(screen, data):
-    h_spacing = math.floor(1423/ 8)
-    v_spacing = math.floor(989 / 8)
-    curr_i = 0
-    curr_j = 0
-    for i_idx, i in enumerate(data):
-        for j_idx, j in enumerate(data):
-            curr_i = h_spacing * i_idx
-            curr_j = v_spacing * j_idx
-            print(f"{curr_i, curr_j=}")
-            print(f"{h_spacing=}")
-            print(f"{v_spacing=}")
-            print(type(h_spacing))
-            print(type(v_spacing))
-            if data[i_idx][j_idx] == 19:
-                color = (0, 200, 0)
-            else:
-                color = (200, 0, 0)
-            pg.draw.circle(screen, color, (curr_i, curr_j), 20)
     
+
 if __name__ == "__main__":
-    test()
+    main()
