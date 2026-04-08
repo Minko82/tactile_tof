@@ -46,6 +46,7 @@ screen = pygame.display.set_mode((width, height), DOUBLEBUF | OPENGL)
 pygame.event.set_grab(True) 
 pygame.mouse.set_visible(False)
 offscreen_surface = pygame.Surface((400, 400))
+vector_surface = pygame.Surface((400, 400))
 
 camera_pos = [0, 1, 5]  
 camera_angle = [0, 0]  
@@ -56,8 +57,8 @@ VERT_SPEED = 0.2
 glEnable(GL_DEPTH_TEST)
 
 red_blue_map = {}
-low = 18
-high = 37
+low = 5
+high = 50
 
 for i, val in enumerate(range(low, high)):
     print(val)
@@ -65,6 +66,64 @@ for i, val in enumerate(range(low, high)):
     r = int(255 * (1 - t))
     b = int(255 * t)
     red_blue_map[val] = (r, 0, b)
+
+
+
+def draw_arrow(
+        surface: pygame.Surface,
+        start: pygame.Vector2,
+        end: pygame.Vector2,
+        color: pygame.Color,
+        body_width: int = 2,
+        head_width: int = 4,
+        head_height: int = 2,
+    ):
+    """Draw an arrow between start and end with the arrow head at the end.
+
+    Args:
+        surface (pygame.Surface): The surface to draw on
+        start (pygame.Vector2): Start position
+        end (pygame.Vector2): End position
+        color (pygame.Color): Color of the arrow
+        body_width (int, optional): Defaults to 2.
+        head_width (int, optional): Defaults to 4.
+        head_height (float, optional): Defaults to 2.
+    """
+    arrow = start - end
+    angle = arrow.angle_to(pygame.Vector2(0, -1))
+    body_length = arrow.length() - head_height
+
+    # Create the triangle head around the origin
+    head_verts = [
+        pygame.Vector2(0, head_height / 2),  # Center
+        pygame.Vector2(head_width / 2, -head_height / 2),  # Bottomright
+        pygame.Vector2(-head_width / 2, -head_height / 2),  # Bottomleft
+    ]
+    # Rotate and translate the head into place
+    translation = pygame.Vector2(0, arrow.length() - (head_height / 2)).rotate(-angle)
+    for i in range(len(head_verts)):
+        head_verts[i].rotate_ip(-angle)
+        head_verts[i] += translation
+        head_verts[i] += start
+
+    pygame.draw.polygon(surface, color, head_verts)
+
+    # Stop weird shapes when the arrow is shorter than arrow head
+    if arrow.length() >= head_height:
+        # Calculate the body rect, rotate and translate into place
+        body_verts = [
+            pygame.Vector2(-body_width / 2, body_length / 2),  # Topleft
+            pygame.Vector2(body_width / 2, body_length / 2),  # Topright
+            pygame.Vector2(body_width / 2, -body_length / 2),  # Bottomright
+            pygame.Vector2(-body_width / 2, -body_length / 2),  # Bottomleft
+        ]
+        translation = pygame.Vector2(0, body_length / 2).rotate(-angle)
+        for i in range(len(body_verts)):
+            body_verts[i].rotate_ip(-angle)
+            body_verts[i] += translation
+            body_verts[i] += start
+
+        pygame.draw.polygon(surface, color, body_verts)
 
 def generate_current_heatmap(surface, data_arr_2d):
     global red_blue_map
@@ -81,6 +140,12 @@ def generate_current_heatmap(surface, data_arr_2d):
             loc_y += 1
         else:
             loc_x += 1
+
+def draw_force_vector(surface, data_arr_2d):
+    max_val = np.amax(data_arr_2d)
+    vector_surface.fill(pygame.Color(0, 0, 0))
+    draw_arrow(vector_surface, pygame.Vector2(100, 200), pygame.Vector2(100 + 200 * (max_val/100), 200), pygame.Color(255, 0, 0), 50, 50, 50)
+    pygame.display.flip()
 
 texID = glGenTextures(1)
 def surfaceToTexture(pygame_surface):
@@ -172,6 +237,15 @@ def draw_cube():
     glTexCoord2f(1, 1); glVertex3f(-1, 1, 1)
     glTexCoord2f(0, 1); glVertex3f(-1, 1, -1)
     glEnd()
+    surfaceToTexture(vector_surface)
+    glBindTexture(GL_TEXTURE_2D, texID)
+    glBegin(GL_QUADS)
+    glTexCoord2f(0, 0); glVertex3f(1, -1, 1)
+    glTexCoord2f(1, 0); glVertex3f(1, 1, 1)
+    glTexCoord2f(1, 1); glVertex3f(-1, 1, 1)
+    glTexCoord2f(0, 1); glVertex3f(-1, -1, 1)
+    glEnd()
+    
     glDisable(GL_TEXTURE_2D)
     glBegin(GL_QUADS)
     for face in faces:
@@ -207,6 +281,7 @@ def main():
         data = np.array(data)
         data = data.reshape(8, 8)
         generate_current_heatmap(offscreen_surface, data)
+        draw_force_vector(vector_surface, data)
         draw_floor()
         draw_cube()
         pygame.display.flip()
