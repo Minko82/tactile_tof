@@ -1,65 +1,101 @@
-# Tactile Tactile Sensor Simulation
+# ToF Sensor Simulator
 
-## Overview
-The goal of this project is to create a **realistic physics simulation of the Ecoflex silicone fingertip** used in our tactile sensor and a **virtual Time-of-Flight (ToF) depth sensor** inside it. This simulation aims to accurately reproduce the deformation of the soft fingertip during grasps to generate synthetic training data.
+This phase validates the VL53L8CX-style Time-of-Flight sensor by itself. The simulator models an 8x8 ray-based proximity sensor in Isaac Sim and writes distance frames that can be inspected in the console, tailed by the live visualizer, or analyzed from CSV.
 
-By combining soft-body physics with simulated depth sensing (ray casting), we aim to generate a stream of depth measurements (at 100–500 Hz) that mathematically matches real-world data.
+The silicone dome, deformable fingertip mesh, scattering, multipath, and touch physics are intentionally excluded from this phase. Those features belong to the next simulator phase after the ToF sensing pipeline is stable.
 
----
+## Current Behavior
 
-## 1. Physics Simulation of the Fingertip
+The main entrypoint is `sim/scripts/run_vl53l8cx_isaac_tof.py`.
 
-### Background
-* **Ecoflex 00-30:** A very soft, stretchy silicone rubber.
-* **Physics Engine:** NVIDIA Newton / Warp (GPU-accelerated physics engine using FEM or MPM).
-* **Key Parameters:** Young's Modulus (E ≈ 30–70 kPa), Poisson's Ratio (ν ≈ 0.45–0.49), and Friction Coefficients.
+By default it:
 
-### Step-by-Step Plan
-1. **Set Up Environment:** Install NVIDIA Warp and Newton.
-2. **Create the Fingertip Mesh:** Convert the CAD model into a tetrahedral mesh (5,000–20,000 tetrahedra) using tools like Gmsh or fTetWild.
-3. **Configure Soft-Body Solver:** Load the mesh, set material parameters (e.g., E=50 kPa, ν=0.47), and anchor the base. Apply forces to verify deformation.
-4. **Sim-to-Real Calibration:** Replicate real grasp scenarios from dataset. Tune parameters (Young's modulus, Poisson's ratio) to minimize MSE/maximize R² (>0.90) between simulated and real depth profiles.
-5. **Document & Visualize:** Save parameters to config, record simulation video, and summarize the process.
+* opens Isaac Sim in GUI mode;
+* creates a gray sandbox with sunlight;
+* shows a visible sensor marker and a 39.89 mm x 40.15 mm x 39.91 mm cube target;
+* enables RTX Lidar debug rays;
+* prints clean accepted 8x8 distance frames;
+* skips startup-empty RTX frames;
+* writes the legacy matrix CSV to `sim/output/vl53l8cx_isaac_tof.csv`;
+* writes the flat live CSV to `sim/output/live_readings.csv`.
 
----
+The flat CSV starts with:
 
-## 2. Virtual Time-of-Flight (ToF) Sensor
+```text
+timestamp,frame_index,sim_tick,valid_zones,zone_00,...,zone_63
+```
 
-### Background
-* **Real Sensor:** A hollow Ecoflex fingertip with a reflective inner layer. An IR ToF sensor at the base measures depth changes as the silicone deforms.
-* **Virtual Sensor:** Uses **ray casting** in simulation to measure distance from the sensor position to the inner silicone surface.
+The same rows reserve `intensity_00...intensity_63` and `material_00...material_63` after the distance zones. Those fields are blank when Isaac does not provide auxiliary return data.
 
-### Step-by-Step Plan
-1. **Set Up Environment:** Familiarize with Warp's `wp.Mesh` and ray-casting API (`wp.mesh_query_ray`).
-2. **Define the Virtual Sensor:** Determine Field of View (FoV), Resolution (e.g., 8x8), Sampling Rate (100-500 Hz), Position, and Orientation. Create a grid of ray directions.
-3. **Implement Ray Casting:** 
-   * Get the current vertex positions of the deformed mesh at each timestep.
-   * Rebuild/update the `wp.Mesh` object.
-   * Cast rays and record hit distances as the simulated depth array.
-4. **High-Frequency Sampling Loop:** 
-   * Run the simulation at the target frequency.
-   * Output the depth array with a timestamp as a CSV file matching the real sensor format (e.g., `time_stamp`, `data`).
-5. **(Bonus) Add Realistic Noise:** Inject Gaussian noise or simulate multipath interference.
-6. **Validate Against Real Data:** Compare the simulated depth stream to real ToF readings and plot the signals.
-7. **Document & Visualize:** Create a visualization (e.g., heatmap or line plot) of the depth arrays during a grasp.
+## Commands
 
----
+Run a GUI validation scene from Isaac Sim's Python directory:
 
-## Deliverables Checklist
-* [ ] Working tet mesh of the fingertip.
-* [ ] Soft-body simulation running on GPU via Newton/Warp.
-* [ ] Virtual ToF sensor (ray-casting pipeline) measuring the deforming mesh.
-* [ ] High-frequency depth stream output (CSV formatting matching real data).
-* [ ] Calibrated material parameters matching real-world data (Comparison plots).
-* [ ] Config file with final parameters.
-* [ ] Short write-up and visualizations (video/heatmap) of the process.
+```powershell
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --frames 120 --scene white-full
+```
 
----
+Run headless data generation:
 
-## Useful Resources
-* [NVIDIA Warp Documentation](https://nvidia.github.io/warp/)
-* [NVIDIA Warp — Mesh Queries & Ray Casting](https://nvidia.github.io/warp/modules/runtime.html#mesh-queries)
-* [NVIDIA Newton](https://developer.nvidia.com/newton)
-* [Gmsh — Mesh Generator](https://gmsh.info/)
-* [Ecoflex 00-30 Datasheet](https://www.smooth-on.com/products/ecoflex-00-30/)
-* Ask if you're stuck or need access to files!
+```powershell
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --frames 300 --scene moving --quiet_arrays --record_test_results
+```
+
+Launch the live visualizer from the simulator:
+
+```powershell
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --frames 10000 --scene white-full --launch_visualizer --visualizer_python py --keep_visualizer_open
+```
+
+Launch the tabletop sensor/cube scene:
+
+```powershell
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --frames 10000 --scene table-cube --launch_visualizer --visualizer_python py --keep_visualizer_open
+```
+
+Or run the visualizer separately against the live CSV:
+
+```powershell
+py "C:\PathTo\tactile_tof\sim\scripts\visualizer.py" --source csv-tail --input_csv "D:\Machines virtueles\tactile_tof\sim\output\live_readings.csv"
+```
+
+## Scenes
+
+`--target_distance_m` is the distance from the sensor to the target's front surface, not the target center. This matches the ToF distance reported by the sensor and avoids placing thick targets inside the near-range boundary.
+
+* `cube`: default 39.89 mm x 40.15 mm x 39.91 mm calibration cube.
+* `table-cube`: tabletop scene with a red ToF housing facing a blue cube. If no target distance is supplied, the cube front face is 50 mm from the sensor face.
+* `white`: flat white panel at the requested target distance; useful for checking partial field-of-view hits.
+* `white-full`: larger white panel sized from the configured FOV and target distance; useful for confirming all 64 zones map correctly.
+* `oblique`: tilted panel that should create a row/column distance gradient.
+* `moving`: white panel moving sinusoidally along the sensor axis.
+* `materials`: vertical material strips for checking intensity and material IDs.
+* `no-target`: no target object; accepted frames should be all zero.
+
+Common options:
+
+```powershell
+--target_distance_m 1.0  # front-surface distance, meters; table-cube defaults to 0.05
+--target_center_z 0.35
+--sensor_xyz 0,0,0.35
+--sensor_quat_wxyz 1,0,0,0
+--max_sim_ticks 5000
+--no_debug_draw
+--print_payload_debug
+```
+
+## Tests
+
+The dependency-free helper tests do not require Isaac Sim:
+
+```powershell
+python -m unittest tests.test_vl53l8cx_isaac_tof
+```
+
+Recommended Isaac smoke checks when Isaac Python is available:
+
+```powershell
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --frames 5 --scene white-full
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --frames 5 --scene no-target
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --frames 10 --scene moving
+```

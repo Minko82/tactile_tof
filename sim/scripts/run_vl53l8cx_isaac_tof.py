@@ -22,6 +22,7 @@ import csv
 import json
 import math
 import re
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +32,13 @@ from typing import Any, Iterable, Sequence
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PROFILE_PATH = REPO_ROOT / "sim" / "config" / "vl53l8cx_8x8.json"
 DEFAULT_OUTPUT_CSV = REPO_ROOT / "sim" / "output" / "vl53l8cx_isaac_tof.csv"
+DEFAULT_FLAT_CSV = REPO_ROOT / "sim" / "output" / "live_readings.csv"
+DEFAULT_TEST_RESULTS_DIR = REPO_ROOT / "sim" / "test_results"
+DEFAULT_VISUALIZER_SCRIPT = REPO_ROOT / "sim" / "scripts" / "visualizer.py"
+TARGET_CUBE_SIZE_M = (0.03989, 0.04015, 0.03991)
+TABLE_CUBE_GAP_M = 0.05
+TABLE_SENSOR_HOUSING_SIZE_M = (0.06, 0.06, 0.055)
+TABLE_SENSOR_FACE_SIZE_M = (0.002, 0.034, 0.022)
 
 
 @dataclass(frozen=True)
@@ -111,6 +119,28 @@ def iter_matrix_rows(matrix: Any) -> list[list[int]]:
     return rows
 
 
+def flatten_matrix(matrix: Any) -> list[int]:
+    return [value for row in iter_matrix_rows(matrix) for value in row]
+
+
+def flatten_optional_matrix(matrix: Any, zones: int) -> list[Any]:
+    if matrix is None:
+        return ["" for _ in range(zones)]
+    if hasattr(matrix, "tolist"):
+        matrix = matrix.tolist()
+
+    values: list[Any] = []
+    for row in matrix:
+        if hasattr(row, "tolist"):
+            row = row.tolist()
+        for value in row:
+            values.append("" if value is None else value)
+
+    if len(values) < zones:
+        values.extend("" for _ in range(zones - len(values)))
+    return values[:zones]
+
+
 def format_matrix_for_csv(matrix: Any) -> str:
     """Format an 8x8 matrix like the existing recorded CSV data.
 
@@ -160,12 +190,57 @@ class VL53L8CXCsvWriter:
         if self._writer is None:
             raise RuntimeError("CSV writer is not open")
         self._writer.writerow(frame.csv_row())
+        if self._handle is not None:
+            self._handle.flush()
 
 
 def write_frames_csv(frames: Iterable[VL53L8CXFrame], path: str | Path, append: bool = False) -> None:
     with VL53L8CXCsvWriter(path, append=append) as writer:
         for frame in frames:
             writer.write_frame(frame)
+
+
+class VL53L8CXFlatCsvWriter:
+    """Flat 64-zone CSV writer for live visualization and offline analysis."""
+
+    def __init__(self, path: str | Path, config: VL53L8CXConfig, append: bool = False) -> None:
+        self.path = Path(path)
+        self.config = config
+        self.append = append
+        self._handle: Any | None = None
+        self._writer: csv.writer | None = None
+
+    def __enter__(self) -> "VL53L8CXFlatCsvWriter":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        should_write_header = not self.append or not self.path.exists() or self.path.stat().st_size == 0
+        self._handle = self.path.open("a" if self.append else "w", encoding="utf-8", newline="")
+        self._writer = csv.writer(self._handle)
+        if should_write_header:
+            self._writer.writerow(
+                ["timestamp", "frame_index", "sim_tick", "valid_zones"]
+                + [f"zone_{index:02d}" for index in range(self.config.zones)]
+                + [f"intensity_{index:02d}" for index in range(self.config.zones)]
+                + [f"material_{index:02d}" for index in range(self.config.zones)]
+            )
+            self._handle.flush()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        if self._handle is not None:
+            self._handle.close()
+        self._handle = None
+        self._writer = None
+
+    def write_frame(self, frame_index: int, sim_tick: int, frame: VL53L8CXFrame) -> None:
+        if self._writer is None:
+            raise RuntimeError("CSV writer is not open")
+        values = flatten_matrix(frame.distances_mm)
+        valid_zones = sum(1 for value in values if value > 0)
+        intensities = flatten_optional_matrix(frame.intensities, self.config.zones)
+        material_ids = flatten_optional_matrix(frame.material_ids, self.config.zones)
+        self._writer.writerow([frame.timestamp, frame_index, sim_tick, valid_zones] + values + intensities + material_ids)
+        if self._handle is not None:
+            self._handle.flush()
 
 
 def distance_m_to_mm(distance_m: Any, config: VL53L8CXConfig) -> int:
@@ -314,6 +389,33 @@ def _print_frame_summary(sensor_frame: Any) -> None:
             print(f"  {key}: {type(value)} {value}")
 
 
+def _format_matrix_for_console(matrix: Any) -> str:
+    rows = iter_matrix_rows(matrix)
+    return "\n".join(
+        ("[[" if index == 0 else " [")
+        + " ".join(f"{value:4d}" for value in row)
+        + ("]]" if index == len(rows) - 1 else "]")
+        for index, row in enumerate(rows)
+    )
+
+
+def _print_distance_matrix(frame_index: int, sim_tick: int, matrix: Any) -> None:
+    values = flatten_matrix(matrix)
+    valid = [value for value in values if value > 0]
+    valid_zones = len(valid)
+    mean_mm = sum(valid) / valid_zones if valid_zones else 0.0
+    min_mm = min(valid) if valid else 0
+    max_mm = max(valid) if valid else 0
+
+    print(
+        f"Frame {frame_index:05d} | sim_tick={sim_tick:05d} | "
+        f"valid_zones={valid_zones} | mean={mean_mm:.1f} mm | min={min_mm} | max={max_mm}"
+    )
+    print()
+    print(_format_matrix_for_console(matrix))
+    print()
+
+
 def _draw_lidar_rays(
     sensor_frame: dict[str, Any],
     draw: Any,
@@ -374,6 +476,32 @@ def frame_from_rtx_scan(sensor_frame: dict[str, Any], config: VL53L8CXConfig) ->
     )
 
 
+def empty_tof_frame(config: VL53L8CXConfig) -> VL53L8CXFrame:
+    """Create an accepted no-return frame with all zones marked invalid."""
+
+    return VL53L8CXFrame(
+        timestamp=datetime.now().time().isoformat(timespec="microseconds"),
+        distances_mm=_empty_matrix(config.rows, config.cols, config.invalid_mm),
+        intensities=None,
+        material_ids=None,
+    )
+
+
+def frame_from_sensor_frame(
+    sensor_frame: Any,
+    config: VL53L8CXConfig,
+    *,
+    allow_empty_no_return: bool = False,
+) -> VL53L8CXFrame | None:
+    """Convert an RTX frame, optionally accepting no-return frames as all-zero output."""
+
+    if _has_distance_payload(sensor_frame):
+        return frame_from_rtx_scan(sensor_frame, config)
+    if allow_empty_no_return:
+        return empty_tof_frame(config)
+    return None
+
+
 def _parse_vec(text: str, expected_len: int, name: str) -> list[float]:
     values = [float(part.strip()) for part in text.split(",") if part.strip()]
     if len(values) != expected_len:
@@ -383,6 +511,38 @@ def _parse_vec(text: str, expected_len: int, name: str) -> list[float]:
 
 def _optional_path(text: str) -> Path | None:
     return None if text == "" else Path(text)
+
+
+def _make_test_results_path() -> Path:
+    name = datetime.now().strftime("readings_%Y-%m-%d_%H-%M-%S.csv")
+    return DEFAULT_TEST_RESULTS_DIR / name
+
+
+def _launch_visualizer(args: argparse.Namespace, flat_csv_path: Path) -> subprocess.Popen[Any]:
+    command = [
+        str(args.visualizer_python),
+        str(args.visualizer_script),
+        "--source",
+        "csv-tail",
+        "--input_csv",
+        str(flat_csv_path),
+    ]
+    creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+    try:
+        return subprocess.Popen(command, creationflags=creationflags)
+    except OSError as exc:
+        raise RuntimeError(f"failed to launch visualizer: {exc}") from exc
+
+
+def _terminate_visualizer(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
 
 
 def _make_sensor_attributes(
@@ -414,6 +574,7 @@ def _make_sensor_attributes(
         "omni:sensor:Core:numberOfChannels": config.zones,
         "omni:sensor:Core:nearRangeM": config.min_range_m,
         "omni:sensor:Core:farRangeM": config.max_range_m,
+        "omni:sensor:Core:minDistBetweenEchosM": config.min_range_m,
         "omni:sensor:Core:maxReturns": 1,
         "omni:sensor:Core:auxOutputType": aux_output_type,
         "omni:sensor:Core:emitterState:s001:azimuthDeg": azimuths,
@@ -463,7 +624,7 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
         import omni.usd
         from isaacsim.sensors.rtx import LidarRtx
         from isaacsim.util.debug_draw import _debug_draw
-        from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+        from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdPhysics, UsdShade
 
         carb.settings.get_settings().set_bool("/app/sensors/nv/lidar/outputBufferOnGPU", True)
         carb.settings.get_settings().set_bool("/rtx-transient/stableIds/enabled", True)
@@ -477,15 +638,33 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
         UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
         UsdGeom.SetStageMetersPerUnit(stage, 1.0)
         UsdPhysics.SetStageKilogramsPerUnit(stage, 1.0)
+        _create_sandbox_world(
+            stage=stage,
+            Gf=Gf,
+            Sdf=Sdf,
+            UsdGeom=UsdGeom,
+            UsdShade=UsdShade,
+            UsdLux=UsdLux,
+        )
 
         scene_updater = _create_isaac_scene(
             args=args,
+            config=config,
             stage=stage,
             Gf=Gf,
             Sdf=Sdf,
             UsdGeom=UsdGeom,
             UsdShade=UsdShade,
         )
+        if args.scene != "table-cube":
+            _add_sensor_visual_marker(
+                stage=stage,
+                sensor_translation=sensor_translation,
+                Gf=Gf,
+                Sdf=Sdf,
+                UsdGeom=UsdGeom,
+                UsdShade=UsdShade,
+            )
 
         sensor = LidarRtx(
             prim_path="/VL53L8CX",
@@ -517,25 +696,54 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
 
         frames: list[VL53L8CXFrame] = []
         csv_writer_context = VL53L8CXCsvWriter(args.output_csv, append=args.append_csv) if args.output_csv else None
-        if csv_writer_context is None:
-            csv_writer = None
-        else:
-            csv_writer = csv_writer_context.__enter__()
+        csv_writer = None
+        flat_csv_path = None if args.disable_flat_csv else Path(args.flat_csv)
+        flat_writer_contexts: list[VL53L8CXFlatCsvWriter] = []
+        if flat_csv_path is not None:
+            flat_writer_contexts.append(VL53L8CXFlatCsvWriter(flat_csv_path, config))
+        if args.record_test_results:
+            flat_writer_contexts.append(VL53L8CXFlatCsvWriter(_make_test_results_path(), config))
+        flat_writers: list[VL53L8CXFlatCsvWriter] = []
+        visualizer_process: subprocess.Popen[Any] | None = None
 
         try:
-            for frame_index in range(args.frames):
+            if csv_writer_context is not None:
+                csv_writer = csv_writer_context.__enter__()
+            for flat_writer_context in flat_writer_contexts:
+                flat_writers.append(flat_writer_context.__enter__())
+            if args.launch_visualizer:
+                if flat_csv_path is None:
+                    raise RuntimeError("--launch_visualizer requires flat CSV output; remove --disable_flat_csv")
+                visualizer_process = _launch_visualizer(args, flat_csv_path)
+
+            valid_count = 0
+            sim_tick = 0
+            max_sim_ticks = args.max_sim_ticks or max(args.frames * 20, args.frames + 300)
+            while valid_count < args.frames:
+                if sim_tick >= max_sim_ticks:
+                    raise RuntimeError(
+                        f"captured {valid_count}/{args.frames} valid ToF frames after "
+                        f"{sim_tick} simulation ticks; increase --max_sim_ticks if the "
+                        "scene is intentionally slow to produce RTX frames"
+                    )
                 if scene_updater is not None:
-                    scene_updater(frame_index)
+                    scene_updater(sim_tick)
                 simulation_app.update()
                 sensor_frame = sensor.get_current_frame()
                 if args.debug_draw and ray_draw is not None and _has_distance_payload(sensor_frame):
                     _draw_lidar_rays(sensor_frame, ray_draw, stage, "/VL53L8CX", Gf, Usd, UsdGeom)
-                if args.print_frames:
+                if args.print_payload_debug:
                     _print_frame_summary(sensor_frame)
-                if not _has_distance_payload(sensor_frame):
+                frame = frame_from_sensor_frame(
+                    sensor_frame,
+                    config,
+                    allow_empty_no_return=args.scene == "no-target",
+                )
+                if frame is None:
+                    sim_tick += 1
                     continue
 
-                frame = frame_from_rtx_scan(sensor_frame, config)
+                frame_index = valid_count
                 frame.distances_mm = np.asarray(frame.distances_mm, dtype=np.int32)
                 if frame.intensities is not None:
                     frame.intensities = np.asarray(frame.intensities, dtype=object)
@@ -544,9 +752,17 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
                 frames.append(frame)
                 if csv_writer is not None:
                     csv_writer.write_frame(frame)
-                if args.print_frames:
-                    print(format_matrix_for_csv(frame.distances_mm))
+                for flat_writer in flat_writers:
+                    flat_writer.write_frame(frame_index, sim_tick, frame)
+                if args.print_arrays:
+                    _print_distance_matrix(frame_index, sim_tick, frame.distances_mm)
+                valid_count += 1
+                sim_tick += 1
         finally:
+            if visualizer_process is not None and not args.keep_visualizer_open:
+                _terminate_visualizer(visualizer_process)
+            for flat_writer_context in reversed(flat_writer_contexts):
+                flat_writer_context.__exit__(None, None, None)
             if csv_writer_context is not None:
                 csv_writer_context.__exit__(None, None, None)
             timeline.stop()
@@ -564,6 +780,7 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
 def _create_isaac_scene(
     *,
     args: argparse.Namespace,
+    config: VL53L8CXConfig,
     stage: Any,
     Gf: Any,
     Sdf: Any,
@@ -578,21 +795,78 @@ def _create_isaac_scene(
         "glass": _create_material(stage, "/World/Looks/PlexiGlass", (0.5, 0.8, 1.0), "PlexiGlassStandard", Gf, Sdf, UsdShade),
         "aluminum": _create_material(stage, "/World/Looks/Aluminum", (0.8, 0.82, 0.84), "MetalAluminum", Gf, Sdf, UsdShade),
         "concrete": _create_material(stage, "/World/Looks/Concrete", (0.5, 0.5, 0.45), "ConcreteRough", Gf, Sdf, UsdShade),
+        "blue": _create_material(stage, "/World/Looks/TableCubeBlue", (0.05, 0.55, 1.0), "Default", Gf, Sdf, UsdShade),
+        "red": _create_material(stage, "/World/Looks/SensorHousingRed", (0.72, 0.04, 0.05), "Default", Gf, Sdf, UsdShade),
+        "black": _create_material(stage, "/World/Looks/SensorFaceBlack", (0.005, 0.005, 0.006), "RubberStandard", Gf, Sdf, UsdShade),
+        "wood": _create_material(stage, "/World/Looks/TableWood", (0.74, 0.58, 0.38), "Default", Gf, Sdf, UsdShade),
+        "wall": _create_material(stage, "/World/Looks/FabricWallGray", (0.55, 0.58, 0.58), "ConcreteRough", Gf, Sdf, UsdShade),
+        "cable_yellow": _create_material(stage, "/World/Looks/CableYellow", (0.85, 0.66, 0.04), "Default", Gf, Sdf, UsdShade),
+        "cable_purple": _create_material(stage, "/World/Looks/CablePurple", (0.28, 0.08, 0.38), "Default", Gf, Sdf, UsdShade),
     }
 
-    distance = args.target_distance_m
+    distance = _scene_target_distance_m(args)
     center_z = args.target_center_z
     if args.scene == "no-target":
         return None
+    if args.scene == "table-cube":
+        _create_table_cube_scene(
+            args=args,
+            target_gap_m=distance,
+            materials=materials,
+            stage=stage,
+            Gf=Gf,
+            UsdGeom=UsdGeom,
+            UsdShade=UsdShade,
+        )
+        return None
+    if args.scene == "cube":
+        size = TARGET_CUBE_SIZE_M
+        _add_box(
+            stage,
+            "/World/Targets/calibration_cube",
+            (_center_x_from_front_distance(distance, size[0]), 0.0, center_z),
+            size,
+            materials["white"],
+            Gf,
+            UsdGeom,
+            UsdShade,
+        )
+        return None
     if args.scene == "white":
-        _add_box(stage, "/World/Targets/white_panel", (distance, 0.0, center_z), (0.02, 0.5, 0.5), materials["white"], Gf, UsdGeom, UsdShade)
+        size = (0.02, 0.5, 0.5)
+        _add_box(
+            stage,
+            "/World/Targets/white_panel",
+            (_center_x_from_front_distance(distance, size[0]), 0.0, center_z),
+            size,
+            materials["white"],
+            Gf,
+            UsdGeom,
+            UsdShade,
+        )
+        return None
+    if args.scene == "white-full":
+        y_span = _fov_span_at_distance(distance, config.fov_h_deg, margin=1.25)
+        z_span = _fov_span_at_distance(distance, config.fov_v_deg, margin=1.25)
+        size = (0.02, y_span, z_span)
+        _add_box(
+            stage,
+            "/World/Targets/white_full_panel",
+            (_center_x_from_front_distance(distance, size[0]), 0.0, center_z),
+            size,
+            materials["white"],
+            Gf,
+            UsdGeom,
+            UsdShade,
+        )
         return None
     if args.scene == "oblique":
+        size = (0.02, 0.55, 0.55)
         prim, _translate_op = _add_box(
             stage,
             "/World/Targets/oblique_panel",
-            (distance, 0.0, center_z),
-            (0.02, 0.55, 0.55),
+            (_center_x_from_front_distance(distance, size[0]), 0.0, center_z),
+            size,
             materials["concrete"],
             Gf,
             UsdGeom,
@@ -602,11 +876,12 @@ def _create_isaac_scene(
         rotate_op.Set(30.0)
         return None
     if args.scene == "moving":
+        size = (0.02, 0.45, 0.45)
         _prim, translate_op = _add_box(
             stage,
             "/World/Targets/moving_panel",
-            (distance, 0.0, center_z),
-            (0.02, 0.45, 0.45),
+            (_center_x_from_front_distance(distance, size[0]), 0.0, center_z),
+            size,
             materials["white"],
             Gf,
             UsdGeom,
@@ -615,7 +890,8 @@ def _create_isaac_scene(
 
         def update(frame_index: int) -> None:
             phase = frame_index / max(args.frames - 1, 1)
-            x = distance + args.motion_amplitude_m * math.sin(2.0 * math.pi * phase)
+            front_x = distance + args.motion_amplitude_m * math.sin(2.0 * math.pi * phase)
+            x = _center_x_from_front_distance(front_x, size[0])
             translate_op.Set(Gf.Vec3d(x, 0.0, center_z))
 
         return update
@@ -623,20 +899,166 @@ def _create_isaac_scene(
     # Material grid scene: five vertical strips across the sensor FoV.
     strip_materials = [materials["white"], materials["rubber"], materials["glass"], materials["aluminum"], materials["concrete"]]
     strip_width = 0.18
+    strip_size = (0.02, strip_width * 0.95, 0.55)
     start_y = -strip_width * (len(strip_materials) - 1) / 2.0
     for index, material in enumerate(strip_materials):
         y = start_y + index * strip_width
         _add_box(
             stage,
             f"/World/Targets/material_strip_{index}",
-            (distance, y, center_z),
-            (0.02, strip_width * 0.95, 0.55),
+            (_center_x_from_front_distance(distance, strip_size[0]), y, center_z),
+            strip_size,
             material,
             Gf,
             UsdGeom,
             UsdShade,
         )
     return None
+
+
+def _scene_target_distance_m(args: argparse.Namespace) -> float:
+    if args.target_distance_m is not None:
+        return args.target_distance_m
+    return TABLE_CUBE_GAP_M if args.scene == "table-cube" else 1.0
+
+
+def _create_table_cube_scene(
+    *,
+    args: argparse.Namespace,
+    target_gap_m: float,
+    materials: dict[str, Any],
+    stage: Any,
+    Gf: Any,
+    UsdGeom: Any,
+    UsdShade: Any,
+) -> None:
+    sensor_x, sensor_y, sensor_z = _parse_vec(args.sensor_xyz, 3, "sensor_xyz")
+    cube_size = TARGET_CUBE_SIZE_M
+    table_top_z = sensor_z - cube_size[2] / 2.0
+    table_thickness = 0.03
+
+    _add_box(
+        stage,
+        "/World/Table/Tabletop",
+        center=(sensor_x + 0.18, sensor_y, table_top_z - table_thickness / 2.0),
+        size=(0.75, 0.55, table_thickness),
+        material=materials["wood"],
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+    _add_box(
+        stage,
+        "/World/Table/BackWall",
+        center=(sensor_x + 0.34, sensor_y, table_top_z + 0.28),
+        size=(0.02, 0.75, 0.56),
+        material=materials["wall"],
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+
+    cube_center_x = sensor_x + _center_x_from_front_distance(target_gap_m, cube_size[0])
+    _add_box(
+        stage,
+        "/World/Targets/table_blue_cube",
+        center=(cube_center_x, sensor_y, sensor_z),
+        size=cube_size,
+        material=materials["blue"],
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+
+    housing_size = TABLE_SENSOR_HOUSING_SIZE_M
+    housing_center_z = table_top_z + housing_size[2] / 2.0
+    _add_box(
+        stage,
+        "/World/Sensors/table_sensor_housing",
+        center=(sensor_x - housing_size[0] / 2.0 - 0.003, sensor_y, housing_center_z),
+        size=housing_size,
+        material=materials["red"],
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+
+    face_size = TABLE_SENSOR_FACE_SIZE_M
+    face_center_x = sensor_x - face_size[0] / 2.0 - 0.001
+    _add_box(
+        stage,
+        "/World/Sensors/table_sensor_face",
+        center=(face_center_x, sensor_y, sensor_z),
+        size=face_size,
+        material=materials["black"],
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+
+    cable_z = table_top_z + 0.003
+    for index, (offset_y, material_name) in enumerate(((-0.006, "cable_yellow"), (0.0, "black"), (0.006, "cable_purple"))):
+        _add_box(
+            stage,
+            f"/World/Sensors/table_sensor_cable_{index}",
+            center=(sensor_x - 0.105, sensor_y + offset_y, cable_z),
+            size=(0.14, 0.003, 0.003),
+            material=materials[material_name],
+            Gf=Gf,
+            UsdGeom=UsdGeom,
+            UsdShade=UsdShade,
+        )
+
+
+def _center_x_from_front_distance(front_distance_m: float, size_x_m: float) -> float:
+    return front_distance_m + size_x_m / 2.0
+
+
+def _fov_span_at_distance(distance_m: float, fov_deg: float, margin: float = 1.0) -> float:
+    half_angle_rad = math.radians(fov_deg / 2.0)
+    return max(0.1, 2.0 * abs(distance_m) * math.tan(half_angle_rad) * margin)
+
+
+def _create_sandbox_world(
+    *,
+    stage: Any,
+    Gf: Any,
+    Sdf: Any,
+    UsdGeom: Any,
+    UsdShade: Any,
+    UsdLux: Any,
+) -> None:
+    """Create a minimal gray sandbox world with sunlight."""
+
+    gray_floor_material = _create_material(
+        stage,
+        "/World/Looks/SandboxGray",
+        (0.45, 0.45, 0.45),
+        "Default",
+        Gf,
+        Sdf,
+        UsdShade,
+    )
+    _add_box(
+        stage,
+        "/World/Sandbox/Floor",
+        center=(1.0, 0.0, -0.01),
+        size=(5.0, 5.0, 0.02),
+        material=gray_floor_material,
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+
+    sun = UsdLux.DistantLight.Define(stage, "/World/Lights/Sun")
+    sun.CreateIntensityAttr(3000.0)
+    sun.CreateAngleAttr(0.53)
+    sun.CreateColorAttr(Gf.Vec3f(1.0, 0.96, 0.88))
+    UsdGeom.Xformable(sun.GetPrim()).AddRotateXYZOp().Set(Gf.Vec3f(-45.0, 0.0, -35.0))
+
+    sky = UsdLux.DomeLight.Define(stage, "/World/Lights/Sky")
+    sky.CreateIntensityAttr(120.0)
+    sky.CreateColorAttr(Gf.Vec3f(0.55, 0.58, 0.62))
 
 
 def _create_material(
@@ -700,24 +1122,89 @@ def _add_box(
     return cube.GetPrim(), translate_op
 
 
+def _add_sensor_visual_marker(
+    stage: Any,
+    sensor_translation: Any,
+    Gf: Any,
+    Sdf: Any,
+    UsdGeom: Any,
+    UsdShade: Any,
+) -> None:
+    """Add a small flat square to visualize the ToF/Lidar sensor body."""
+
+    sensor_material = _create_material(
+        stage,
+        "/World/Looks/SensorMarkerBlue",
+        (0.05, 0.35, 1.0),
+        "Default",
+        Gf,
+        Sdf,
+        UsdShade,
+    )
+
+    x = float(sensor_translation[0])
+    y = float(sensor_translation[1])
+    z = float(sensor_translation[2])
+    _add_box(
+        stage,
+        "/World/Sensors/VL53L8CX_VisualMarker",
+        center=(x - 0.015, y, z),
+        size=(0.01, 0.12, 0.12),
+        material=sensor_material,
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a VL53L8CX-style RTX ToF prototype in Isaac Sim.")
     parser.add_argument("--profile", type=Path, default=DEFAULT_PROFILE_PATH, help="Path to the VL53L8CX JSON profile.")
     parser.add_argument("--output_csv", type=_optional_path, default=DEFAULT_OUTPUT_CSV, help="CSV output path; pass an empty string to disable.")
     parser.add_argument("--output_npy", type=Path, default=None, help="Optional .npy output path for stacked distance frames.")
     parser.add_argument("--append_csv", action="store_true", help="Append to CSV instead of replacing it.")
-    parser.add_argument("--frames", type=int, default=120, help="Number of frames to run.")
+    parser.add_argument("--frames", type=int, default=120, help="Number of valid ToF frames to capture.")
+    parser.add_argument(
+        "--max_sim_ticks",
+        type=int,
+        default=0,
+        help="Maximum simulation ticks to search for valid frames; 0 uses an automatic limit.",
+    )
     parser.add_argument("--headless", action="store_true", help="Run Isaac Sim headlessly.")
     parser.add_argument("--renderer", default="RaytracedLighting", help="Isaac renderer name.")
-    parser.add_argument("--debug_draw", action="store_true", help="Attach RTX lidar debug-draw point cloud writer.")
-    parser.add_argument("--print_frames", action="store_true", help="Print each 8x8 distance matrix.")
+    parser.set_defaults(debug_draw=True)
+    parser.add_argument("--debug_draw", dest="debug_draw", action="store_true", help="Enable RTX lidar debug drawing.")
+    parser.add_argument("--no_debug_draw", dest="debug_draw", action="store_false", help="Disable RTX lidar debug drawing.")
+    parser.set_defaults(print_arrays=True)
+    parser.add_argument("--print_arrays", dest="print_arrays", action="store_true", help="Print each valid 8x8 distance matrix.")
+    parser.add_argument("--quiet_arrays", dest="print_arrays", action="store_false", help="Disable console matrix output.")
+    parser.add_argument("--print_payload_debug", action="store_true", help="Print verbose RTX payload keys and array shapes.")
+    parser.add_argument("--print_frames", dest="print_arrays", action="store_true", help="Deprecated alias for --print_arrays.")
+    parser.add_argument("--flat_csv", type=Path, default=DEFAULT_FLAT_CSV, help="Flat live CSV path with zone_00 through zone_63 columns.")
+    parser.add_argument("--disable_flat_csv", action="store_true", help="Disable flat live CSV output.")
+    parser.add_argument(
+        "--record_test_results",
+        action="store_true",
+        help="Also write sim/test_results/readings_YYYY-MM-DD_HH-MM-SS.csv.",
+    )
+    parser.add_argument("--launch_visualizer", action="store_true", help="Launch the live CSV visualizer alongside the simulator.")
+    parser.add_argument("--visualizer_script", type=Path, default=DEFAULT_VISUALIZER_SCRIPT, help="Path to the visualizer script.")
+    parser.add_argument("--visualizer_python", default="python", help="Python executable used to launch the visualizer.")
+    parser.add_argument("--keep_visualizer_open", action="store_true", help="Do not terminate the visualizer when the simulator exits.")
     parser.add_argument(
         "--scene",
-        choices=("materials", "white", "oblique", "moving", "no-target"),
-        default="materials",
+        choices=("cube", "table-cube", "materials", "white", "white-full", "oblique", "moving", "no-target"),
+        default="cube",
         help="Prototype scene to render.",
     )
-    parser.add_argument("--target_distance_m", type=float, default=1.0, help="Nominal target distance in meters.")
+    parser.add_argument(
+        "--target_distance_m",
+        "--target_distance",
+        dest="target_distance_m",
+        type=float,
+        default=None,
+        help="Nominal target front-surface distance in meters; defaults to 50 mm for table-cube and 1 m otherwise.",
+    )
     parser.add_argument("--target_center_z", type=float, default=0.35, help="Target center height in meters.")
     parser.add_argument("--motion_amplitude_m", type=float, default=0.25, help="Moving-scene sinusoid amplitude.")
     parser.add_argument("--sensor_xyz", default="0,0,0.35", help="Sensor translation as x,y,z meters.")
@@ -730,6 +1217,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.frames <= 0:
         raise SystemExit("--frames must be positive")
+    if args.max_sim_ticks < 0:
+        raise SystemExit("--max_sim_ticks must be non-negative")
     run_isaac_prototype(args)
 
 

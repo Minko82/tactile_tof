@@ -28,7 +28,15 @@ tof = load_module()
 
 class VL53L8CXCoreTests(unittest.TestCase):
     def test_default_config_and_json_profile(self):
+        default = tof.VL53L8CXConfig()
         config = tof.VL53L8CXConfig.from_json(REPO_ROOT / "sim" / "config" / "vl53l8cx_8x8.json")
+        self.assertEqual(default.rows, config.rows)
+        self.assertEqual(default.cols, config.cols)
+        self.assertEqual(default.fov_h_deg, config.fov_h_deg)
+        self.assertEqual(default.fov_v_deg, config.fov_v_deg)
+        self.assertEqual(default.min_mm, config.min_mm)
+        self.assertEqual(default.max_mm, config.max_mm)
+        self.assertEqual(default.invalid_mm, config.invalid_mm)
         self.assertEqual(config.rows, 8)
         self.assertEqual(config.cols, 8)
         self.assertEqual(config.zones, 64)
@@ -76,6 +84,14 @@ class VL53L8CXCoreTests(unittest.TestCase):
         self.assertEqual(attrs["OmniSensorGenericLidarCoreEmitterStateAPI:s001:azimuthEndDeg"], 22.5)
         self.assertEqual(attrs["OmniSensorGenericLidarCoreEmitterStateAPI:s001:minRangeM"], 0.02)
         self.assertEqual(attrs["OmniSensorGenericLidarCoreEmitterStateAPI:s001:maxRangeM"], 4.0)
+        self.assertEqual(attrs["omni:sensor:Core:minDistBetweenEchosM"], 0.02)
+
+    def test_target_distance_is_front_surface_distance(self):
+        self.assertAlmostEqual(tof._center_x_from_front_distance(0.03, tof.TARGET_CUBE_SIZE_M[0]), 0.049945)
+        parser = tof.build_arg_parser()
+        self.assertEqual(tof._scene_target_distance_m(parser.parse_args(["--scene", "cube"])), 1.0)
+        self.assertEqual(tof._scene_target_distance_m(parser.parse_args(["--scene", "table-cube"])), 0.05)
+        self.assertEqual(tof._scene_target_distance_m(parser.parse_args(["--scene", "table-cube", "--target_distance", "0.03"])), 0.03)
 
     def test_build_distance_matrix_from_returns(self):
         config = tof.VL53L8CXConfig()
@@ -124,6 +140,87 @@ class VL53L8CXCoreTests(unittest.TestCase):
         self.assertEqual(rows[0], ["time_stamp", "data"])
         self.assertEqual(rows[1][0], "12:00:00.000000")
         self.assertEqual(tof.parse_matrix_text(rows[1][1]), frame.distances_mm)
+
+    def test_flat_csv_writer_creates_zone_columns(self):
+        config = tof.VL53L8CXConfig()
+        matrix = [[row * 8 + col for col in range(8)] for row in range(8)]
+        frame = tof.VL53L8CXFrame("12:00:00.000000", matrix)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "live.csv"
+            with tof.VL53L8CXFlatCsvWriter(path, config) as writer:
+                writer.write_frame(2, 9, frame)
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle)
+                header = reader.fieldnames
+                rows = list(reader)
+        self.assertIsNotNone(header)
+        self.assertEqual(header[4], "zone_00")
+        self.assertEqual(header[67], "zone_63")
+        self.assertEqual(header[68], "intensity_00")
+        self.assertEqual(header[131], "intensity_63")
+        self.assertEqual(header[132], "material_00")
+        self.assertEqual(header[195], "material_63")
+        self.assertIn("zone_00", rows[0])
+        self.assertIn("zone_63", rows[0])
+        self.assertEqual(rows[0]["frame_index"], "2")
+        self.assertEqual(rows[0]["sim_tick"], "9")
+        self.assertEqual(rows[0]["valid_zones"], "63")
+        self.assertEqual(rows[0]["zone_00"], "0")
+        self.assertEqual(rows[0]["zone_63"], "63")
+        self.assertEqual(rows[0]["intensity_00"], "")
+        self.assertEqual(rows[0]["material_63"], "")
+
+    def test_flat_csv_writer_writes_auxiliary_columns(self):
+        config = tof.VL53L8CXConfig()
+        matrix = [[100 for _ in range(8)] for _ in range(8)]
+        intensities = [[None for _ in range(8)] for _ in range(8)]
+        material_ids = [[None for _ in range(8)] for _ in range(8)]
+        intensities[0][0] = 0.5
+        intensities[7][7] = 1.25
+        material_ids[0][0] = 10
+        material_ids[7][7] = 99
+        frame = tof.VL53L8CXFrame("12:00:00.000000", matrix, intensities=intensities, material_ids=material_ids)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "live.csv"
+            with tof.VL53L8CXFlatCsvWriter(path, config) as writer:
+                writer.write_frame(0, 4, frame)
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+        self.assertEqual(rows[0]["valid_zones"], "64")
+        self.assertEqual(rows[0]["intensity_00"], "0.5")
+        self.assertEqual(rows[0]["intensity_63"], "1.25")
+        self.assertEqual(rows[0]["material_00"], "10")
+        self.assertEqual(rows[0]["material_63"], "99")
+
+    def test_empty_startup_frame_skip_and_no_target_zero_frame(self):
+        config = tof.VL53L8CXConfig()
+        self.assertIsNone(tof.frame_from_sensor_frame({}, config))
+        self.assertIsNone(tof.frame_from_sensor_frame({"IsaacCreateRTXLidarScanBuffer": {"distance": []}}, config))
+
+        frame = tof.frame_from_sensor_frame({}, config, allow_empty_no_return=True)
+        self.assertIsNotNone(frame)
+        self.assertEqual(tof.flatten_matrix(frame.distances_mm), [0 for _ in range(config.zones)])
+        self.assertIsNone(frame.intensities)
+        self.assertIsNone(frame.material_ids)
+
+    def test_parser_defaults_debug_draw_and_array_printing_on(self):
+        parser = tof.build_arg_parser()
+        args = parser.parse_args([])
+        self.assertTrue(args.debug_draw)
+        self.assertTrue(args.print_arrays)
+        self.assertFalse(args.print_payload_debug)
+        self.assertFalse(args.headless)
+        self.assertEqual(args.max_sim_ticks, 0)
+        self.assertIsNone(args.target_distance_m)
+
+        quiet = parser.parse_args(["--no_debug_draw", "--quiet_arrays", "--scene", "white-full", "--max_sim_ticks", "123"])
+        self.assertFalse(quiet.debug_draw)
+        self.assertFalse(quiet.print_arrays)
+        self.assertEqual(quiet.scene, "white-full")
+        self.assertEqual(quiet.max_sim_ticks, 123)
+
+        alias = parser.parse_args(["--target_distance", "0.03"])
+        self.assertEqual(alias.target_distance_m, 0.03)
 
 
 if __name__ == "__main__":
