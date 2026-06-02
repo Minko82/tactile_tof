@@ -9,7 +9,7 @@ arduino_cli_path = "arduino-cli"
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
 # Point to the SKETCH folder
-sketch_dir = os.path.join(base_dir, "sketch_jan15a")
+sketch_dir = os.path.join(base_dir, "firmware", "basic_sensor")
 # Point to the SparkFun VL53L5CX library folder
 sparkfun_lib_path = os.path.join(base_dir, "SparkFun_VL53L5CX_Arduino_Library")
 
@@ -41,4 +41,4 @@ subprocess.run(upload_cmd, check=True)
 
 print("Upload complete. Launching Python Viz...")
 time.sleep(3) 
-subprocess.run(["python3", "tof_matrix_viz.py"], check=True)
+subprocess.run(["python3", os.path.join(base_dir, "vis", "tof_matrix_viz.py")], check=True)
