@@ -23,6 +23,7 @@ import json
 import math
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,9 @@ TARGET_CUBE_SIZE_M = (0.03989, 0.04015, 0.03991)
 TABLE_CUBE_GAP_M = 0.05
 TABLE_SENSOR_HOUSING_SIZE_M = (0.06, 0.06, 0.055)
 TABLE_SENSOR_FACE_SIZE_M = (0.002, 0.034, 0.022)
+SUPPORTED_SILICONE_SHAPES = ("none", "flat", "convex", "concave", "half_dome", "cube", "fingertip")
+COMPARISON_SILICONE_SHAPES = ("flat", "convex", "concave", "half_dome", "cube", "fingertip")
+DEFAULT_SHAPE_TESTS_DIR = REPO_ROOT / "sim" / "output" / "shape_tests"
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,116 @@ class VL53L8CXConfig:
             return cls.from_mapping(json.load(handle))
 
 
+@dataclass(frozen=True)
+class SiliconeProfile:
+    """Parametric silicone mold and approximate optical material settings."""
+
+    shape: str = "none"
+    width_m: float = 0.04
+    height_m: float = 0.04
+    thickness_m: float = 0.006
+    radius_m: float = 0.025
+    curvature: float = 1.0
+    offset_from_sensor_m: float = 0.02
+    refractive_index: float = 1.41
+    transparency: float = 0.86
+    scattering_strength: float = 0.20
+    absorption_strength: float = 0.05
+    surface_roughness: float = 0.15
+    reflective_inner_coating: bool = False
+
+    def __post_init__(self) -> None:
+        shape = str(self.shape or "none").strip().lower().replace("-", "_")
+        object.__setattr__(self, "shape", shape)
+        if self.shape not in SUPPORTED_SILICONE_SHAPES:
+            choices = ", ".join(SUPPORTED_SILICONE_SHAPES)
+            raise ValueError(f"unsupported silicone shape {self.shape!r}; choose one of: {choices}")
+        for field_name in ("width_m", "height_m", "thickness_m", "radius_m"):
+            if float(getattr(self, field_name)) <= 0.0:
+                raise ValueError(f"{field_name} must be positive")
+        if self.curvature < 0.0:
+            raise ValueError("curvature must be non-negative")
+        if self.offset_from_sensor_m < 0.0:
+            raise ValueError("offset_from_sensor_m must be non-negative")
+        if self.refractive_index < 1.0:
+            raise ValueError("refractive_index must be >= 1.0")
+        for field_name in ("transparency", "scattering_strength", "absorption_strength", "surface_roughness"):
+            value = float(getattr(self, field_name))
+            if value < 0.0 or value > 1.0:
+                raise ValueError(f"{field_name} must be between 0 and 1")
+
+    @property
+    def is_enabled(self) -> bool:
+        return self.shape != "none"
+
+    @classmethod
+    def from_mapping(cls, data: dict[str, Any]) -> "SiliconeProfile":
+        aliases = {
+            "silicone_shape": "shape",
+            "silicone_width": "width_m",
+            "silicone_width_m": "width_m",
+            "silicone_height": "height_m",
+            "silicone_height_m": "height_m",
+            "silicone_thickness": "thickness_m",
+            "silicone_thickness_m": "thickness_m",
+            "silicone_radius": "radius_m",
+            "silicone_radius_m": "radius_m",
+            "silicone_curvature": "curvature",
+            "silicone_offset_from_sensor": "offset_from_sensor_m",
+            "silicone_offset_from_sensor_m": "offset_from_sensor_m",
+        }
+        known = {field for field in cls.__dataclass_fields__}
+        normalized: dict[str, Any] = {}
+        for key, value in data.items():
+            field_name = aliases.get(key, key)
+            if field_name in known:
+                normalized[field_name] = value
+        return cls(**normalized)
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> "SiliconeProfile":
+        with Path(path).open("r", encoding="utf-8") as handle:
+            return cls.from_mapping(json.load(handle))
+
+    def with_overrides(self, overrides: dict[str, Any]) -> "SiliconeProfile":
+        data = {field: getattr(self, field) for field in self.__dataclass_fields__}
+        data.update({key: value for key, value in overrides.items() if value is not None})
+        return SiliconeProfile.from_mapping(data)
+
+
+@dataclass(frozen=True)
+class SiliconeSurfaceSample:
+    within_aperture: bool
+    x_m: float
+    normal: tuple[float, float, float]
+    radial_fraction: float
+
+
+@dataclass(frozen=True)
+class SiliconeZoneResponse:
+    raw_distance_mm: int
+    refracted_distance_mm: int
+    measured_tof_mm: int
+    optical_loss: float | None
+    surface_angle_deg: float | None
+    ray_deviation_deg: float | None
+    valid: bool
+
+
+@dataclass(frozen=True)
+class ShapeComparisonSummary:
+    shape_id: str
+    csv_path: Path
+    frames: int
+    mean_distance: float
+    mean_intensity: float
+    valid_zones: float
+    spatial_variance: float
+    edge_distortion: float
+    center_distortion: float
+    estimated_optical_loss: float
+
+
 @dataclass
 class VL53L8CXFrame:
     """One timestamped VL53L8CX-style frame.
@@ -101,6 +215,12 @@ class VL53L8CXFrame:
     distances_mm: Any
     intensities: Any | None = None
     material_ids: Any | None = None
+    raw_distances_mm: Any | None = None
+    refracted_distances_mm: Any | None = None
+    optical_loss: Any | None = None
+    surface_angles_deg: Any | None = None
+    ray_deviation_deg: Any | None = None
+    shape_id: str | None = None
 
     def csv_row(self) -> list[str]:
         return [self.timestamp, format_matrix_for_csv(self.distances_mm)]
@@ -162,6 +282,267 @@ def parse_matrix_text(text: str, rows: int = 8, cols: int = 8) -> list[list[int]
     return [values[start : start + cols] for start in range(0, expected, cols)]
 
 
+def _clamp(value: float, low: float, high: float) -> float:
+    return min(max(value, low), high)
+
+
+def _dot3(left: tuple[float, float, float], right: tuple[float, float, float]) -> float:
+    return left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+
+
+def _normalize3(vector: tuple[float, float, float]) -> tuple[float, float, float]:
+    length = math.sqrt(_dot3(vector, vector))
+    if length <= 0.0:
+        return (1.0, 0.0, 0.0)
+    return (vector[0] / length, vector[1] / length, vector[2] / length)
+
+
+def _mul3(vector: tuple[float, float, float], scale: float) -> tuple[float, float, float]:
+    return (vector[0] * scale, vector[1] * scale, vector[2] * scale)
+
+
+def _add3(
+    left: tuple[float, float, float],
+    right: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    return (left[0] + right[0], left[1] + right[1], left[2] + right[2])
+
+
+def zone_ray_direction(row: int, col: int, config: VL53L8CXConfig) -> tuple[float, float, float]:
+    """Return the unit ray direction for one +X-facing VL53L8CX zone."""
+
+    if row < 0 or row >= config.rows or col < 0 or col >= config.cols:
+        raise ValueError(f"row/col ({row}, {col}) outside {config.rows}x{config.cols}")
+    half_h = config.fov_h_deg / 2.0
+    half_v = config.fov_v_deg / 2.0
+    azimuth = -half_h + (config.fov_h_deg * col / max(config.cols - 1, 1))
+    elevation = half_v - (config.fov_v_deg * row / max(config.rows - 1, 1))
+    return _normalize3((1.0, math.tan(math.radians(azimuth)), math.tan(math.radians(elevation))))
+
+
+def silicone_surface_sample(profile: SiliconeProfile, y_m: float, z_m: float) -> SiliconeSurfaceSample:
+    """Approximate the first air-to-silicone surface at a local Y/Z coordinate."""
+
+    half_w = max(profile.width_m / 2.0, 1.0e-9)
+    half_h = max(profile.height_m / 2.0, 1.0e-9)
+    yn = y_m / half_w
+    zn = z_m / half_h
+    rectangular_fraction = max(abs(yn), abs(zn))
+    elliptical_r2 = yn * yn + zn * zn
+    elliptical_fraction = math.sqrt(max(elliptical_r2, 0.0))
+    sag = 0.0
+    grad_y = 0.0
+    grad_z = 0.0
+
+    if profile.shape in ("none", "flat", "cube"):
+        within = rectangular_fraction <= 1.0
+        radial_fraction = min(rectangular_fraction, 1.0)
+    elif profile.shape in ("convex", "concave", "fingertip"):
+        within = elliptical_r2 <= 1.0
+        radial_fraction = min(elliptical_fraction, 1.0)
+        if profile.shape == "fingertip":
+            amp = min(profile.radius_m * 0.45, profile.thickness_m * max(profile.curvature, 0.0) * 1.8)
+            remaining = max(1.0 - radial_fraction * radial_fraction, 0.0)
+            sag = amp * (remaining**0.65)
+            if radial_fraction < 1.0 and remaining > 1.0e-9:
+                derivative = -1.30 * amp * (remaining**-0.35)
+                grad_y = derivative * y_m / (half_w * half_w)
+                grad_z = derivative * z_m / (half_h * half_h)
+        else:
+            amp = min(profile.radius_m * 0.35, profile.thickness_m * max(profile.curvature, 0.0))
+            sign = 1.0 if profile.shape == "convex" else -1.0
+            sag = sign * amp * max(1.0 - elliptical_r2, 0.0)
+            grad_y = sign * amp * (-2.0 * y_m / (half_w * half_w))
+            grad_z = sign * amp * (-2.0 * z_m / (half_h * half_h))
+    elif profile.shape == "half_dome":
+        rim_radius = min(half_w, half_h)
+        rho = math.sqrt(y_m * y_m + z_m * z_m)
+        within = rho <= rim_radius
+        radial_fraction = min(rho / max(rim_radius, 1.0e-9), 1.0)
+        radius = max(profile.radius_m, rim_radius * 1.01)
+        center_term = max(radius * radius - rho * rho, 1.0e-12)
+        rim_term = max(radius * radius - rim_radius * rim_radius, 1.0e-12)
+        sag = (math.sqrt(center_term) - math.sqrt(rim_term)) * profile.curvature
+        grad_y = -profile.curvature * y_m / math.sqrt(center_term)
+        grad_z = -profile.curvature * z_m / math.sqrt(center_term)
+    else:
+        within = False
+        radial_fraction = 1.0
+
+    x_m = max(profile.offset_from_sensor_m + sag, 0.0)
+    normal = _normalize3((-1.0, grad_y, grad_z))
+    return SiliconeSurfaceSample(within, x_m, normal, radial_fraction)
+
+
+def _refract_direction(
+    incident: tuple[float, float, float],
+    normal: tuple[float, float, float],
+    n1: float,
+    n2: float,
+) -> tuple[float, float, float]:
+    """Refract a unit vector through a surface normal using Snell's law."""
+
+    incident = _normalize3(incident)
+    normal = _normalize3(normal)
+    cos_i = _clamp(-_dot3(normal, incident), -1.0, 1.0)
+    eta_i = n1
+    eta_t = n2
+    if cos_i < 0.0:
+        cos_i = -cos_i
+        normal = _mul3(normal, -1.0)
+        eta_i, eta_t = eta_t, eta_i
+    eta = eta_i / max(eta_t, 1.0e-9)
+    k = 1.0 - eta * eta * (1.0 - cos_i * cos_i)
+    if k < 0.0:
+        return incident
+    return _normalize3(_add3(_mul3(incident, eta), _mul3(normal, eta * cos_i - math.sqrt(k))))
+
+
+def estimate_silicone_zone_response(
+    raw_distance_mm: int,
+    row: int,
+    col: int,
+    config: VL53L8CXConfig,
+    profile: SiliconeProfile,
+) -> SiliconeZoneResponse:
+    """Estimate one zone's measured ToF after passing through a silicone mold."""
+
+    if raw_distance_mm <= config.invalid_mm or not profile.is_enabled:
+        return SiliconeZoneResponse(
+            raw_distance_mm=raw_distance_mm,
+            refracted_distance_mm=raw_distance_mm,
+            measured_tof_mm=raw_distance_mm,
+            optical_loss=None,
+            surface_angle_deg=None,
+            ray_deviation_deg=None,
+            valid=raw_distance_mm > config.invalid_mm,
+        )
+
+    raw_distance_m = raw_distance_mm / 1000.0
+    ray = zone_ray_direction(row, col, config)
+    plane_t = profile.offset_from_sensor_m / max(ray[0], 1.0e-9)
+    y_m = ray[1] * plane_t
+    z_m = ray[2] * plane_t
+    surface = silicone_surface_sample(profile, y_m, z_m)
+
+    if not surface.within_aperture or raw_distance_m <= surface.x_m:
+        return SiliconeZoneResponse(
+            raw_distance_mm=raw_distance_mm,
+            refracted_distance_mm=raw_distance_mm,
+            measured_tof_mm=raw_distance_mm,
+            optical_loss=0.0,
+            surface_angle_deg=0.0,
+            ray_deviation_deg=0.0,
+            valid=True,
+        )
+
+    cos_i = abs(_dot3(ray, surface.normal))
+    cos_i = _clamp(cos_i, 0.0, 1.0)
+    theta_i = math.acos(cos_i)
+    sin_t = _clamp(math.sin(theta_i) / max(profile.refractive_index, 1.0e-9), 0.0, 0.999999)
+    theta_t = math.asin(sin_t)
+    cos_t = max(math.cos(theta_t), 0.20)
+    silicone_path_m = profile.thickness_m / cos_t
+    extra_optical_path_m = (profile.refractive_index - 1.0) * silicone_path_m
+    refracted_distance_m = raw_distance_m + extra_optical_path_m
+
+    angle_factor = math.sin(theta_i) ** 2
+    path_ratio = silicone_path_m / max(profile.thickness_m, 1.0e-9)
+    base_loss = 1.0 - profile.transparency
+    absorption_loss = profile.absorption_strength * path_ratio * 0.35
+    scattering_loss = profile.scattering_strength * (0.12 + 0.88 * angle_factor + 0.20 * surface.radial_fraction**2)
+    roughness_loss = profile.surface_roughness * angle_factor * 0.25
+    edge_loss = 0.0
+    if profile.shape == "cube":
+        edge_loss = max(surface.radial_fraction - 0.75, 0.0) * 0.35
+    coating_gain = 0.08 if profile.reflective_inner_coating else 0.0
+    optical_loss = _clamp(base_loss + absorption_loss + scattering_loss + roughness_loss + edge_loss - coating_gain, 0.0, 0.98)
+
+    ray_deviation_deg = abs(math.degrees(theta_i - theta_t))
+    normal_tilt = math.sqrt(surface.normal[1] * surface.normal[1] + surface.normal[2] * surface.normal[2])
+    curvature_bias_m = 0.0
+    if profile.shape in ("convex", "half_dome", "fingertip"):
+        curvature_bias_m = normal_tilt * profile.thickness_m * 0.90
+    elif profile.shape == "concave":
+        curvature_bias_m = -normal_tilt * profile.thickness_m * 0.60
+    measured_distance_m = refracted_distance_m + optical_loss * profile.thickness_m * 0.20
+    measured_distance_m += (ray_deviation_deg / 90.0) * profile.thickness_m * 0.05
+    measured_distance_m += curvature_bias_m
+
+    return SiliconeZoneResponse(
+        raw_distance_mm=raw_distance_mm,
+        refracted_distance_mm=distance_m_to_mm(refracted_distance_m, config),
+        measured_tof_mm=distance_m_to_mm(measured_distance_m, config),
+        optical_loss=round(optical_loss, 6),
+        surface_angle_deg=round(math.degrees(theta_i), 6),
+        ray_deviation_deg=round(ray_deviation_deg, 6),
+        valid=True,
+    )
+
+
+def apply_silicone_optical_response(
+    frame: VL53L8CXFrame,
+    config: VL53L8CXConfig,
+    profile: SiliconeProfile,
+) -> VL53L8CXFrame:
+    """Replace ``frame.distances_mm`` with the silicone-modified measured ToF matrix."""
+
+    if not profile.is_enabled:
+        return frame
+
+    raw_rows = iter_matrix_rows(frame.distances_mm)
+    measured_rows: list[list[int]] = []
+    refracted_rows: list[list[int]] = []
+    optical_loss_rows: list[list[float | None]] = []
+    surface_angle_rows: list[list[float | None]] = []
+    ray_deviation_rows: list[list[float | None]] = []
+
+    for row_index, raw_row in enumerate(raw_rows):
+        measured_row: list[int] = []
+        refracted_row: list[int] = []
+        optical_loss_row: list[float | None] = []
+        surface_angle_row: list[float | None] = []
+        ray_deviation_row: list[float | None] = []
+        for col_index, raw_value in enumerate(raw_row):
+            response = estimate_silicone_zone_response(raw_value, row_index, col_index, config, profile)
+            measured_row.append(response.measured_tof_mm)
+            refracted_row.append(response.refracted_distance_mm)
+            optical_loss_row.append(response.optical_loss)
+            surface_angle_row.append(response.surface_angle_deg)
+            ray_deviation_row.append(response.ray_deviation_deg)
+        measured_rows.append(measured_row)
+        refracted_rows.append(refracted_row)
+        optical_loss_rows.append(optical_loss_row)
+        surface_angle_rows.append(surface_angle_row)
+        ray_deviation_rows.append(ray_deviation_row)
+
+    frame.raw_distances_mm = [list(row) for row in raw_rows]
+    frame.refracted_distances_mm = refracted_rows
+    frame.distances_mm = measured_rows
+    frame.optical_loss = optical_loss_rows
+    frame.surface_angles_deg = surface_angle_rows
+    frame.ray_deviation_deg = ray_deviation_rows
+    frame.shape_id = profile.shape
+
+    if frame.intensities is not None:
+        intensity_rows: list[list[float | None]] = []
+        source = frame.intensities.tolist() if hasattr(frame.intensities, "tolist") else frame.intensities
+        for row_index, row in enumerate(source):
+            if hasattr(row, "tolist"):
+                row = row.tolist()
+            intensity_row: list[float | None] = []
+            for col_index, value in enumerate(row):
+                if value is None:
+                    intensity_row.append(None)
+                    continue
+                loss = optical_loss_rows[row_index][col_index] or 0.0
+                intensity_row.append(float(value) * max(1.0 - loss, 0.0))
+            intensity_rows.append(intensity_row)
+        frame.intensities = intensity_rows
+
+    return frame
+
+
 class VL53L8CXCsvWriter:
     """CSV writer compatible with ``examples/press_example.csv``."""
 
@@ -221,6 +602,12 @@ class VL53L8CXFlatCsvWriter:
                 + [f"zone_{index:02d}" for index in range(self.config.zones)]
                 + [f"intensity_{index:02d}" for index in range(self.config.zones)]
                 + [f"material_{index:02d}" for index in range(self.config.zones)]
+                + ["shape_id"]
+                + [f"raw_distance_{index:02d}" for index in range(self.config.zones)]
+                + [f"refracted_distance_{index:02d}" for index in range(self.config.zones)]
+                + [f"optical_loss_{index:02d}" for index in range(self.config.zones)]
+                + [f"surface_angle_{index:02d}" for index in range(self.config.zones)]
+                + [f"ray_deviation_{index:02d}" for index in range(self.config.zones)]
             )
             self._handle.flush()
         return self
@@ -238,9 +625,195 @@ class VL53L8CXFlatCsvWriter:
         valid_zones = sum(1 for value in values if value > 0)
         intensities = flatten_optional_matrix(frame.intensities, self.config.zones)
         material_ids = flatten_optional_matrix(frame.material_ids, self.config.zones)
-        self._writer.writerow([frame.timestamp, frame_index, sim_tick, valid_zones] + values + intensities + material_ids)
+        raw_distances = flatten_optional_matrix(frame.raw_distances_mm, self.config.zones)
+        refracted_distances = flatten_optional_matrix(frame.refracted_distances_mm, self.config.zones)
+        optical_loss = flatten_optional_matrix(frame.optical_loss, self.config.zones)
+        surface_angles = flatten_optional_matrix(frame.surface_angles_deg, self.config.zones)
+        ray_deviation = flatten_optional_matrix(frame.ray_deviation_deg, self.config.zones)
+        self._writer.writerow(
+            [frame.timestamp, frame_index, sim_tick, valid_zones]
+            + values
+            + intensities
+            + material_ids
+            + [frame.shape_id or ""]
+            + raw_distances
+            + refracted_distances
+            + optical_loss
+            + surface_angles
+            + ray_deviation
+        )
         if self._handle is not None:
             self._handle.flush()
+
+
+def _zone_columns(prefix: str, config: VL53L8CXConfig) -> list[str]:
+    return [f"{prefix}_{index:02d}" for index in range(config.zones)]
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _edge_zone_indices(config: VL53L8CXConfig) -> list[int]:
+    indices: list[int] = []
+    for row in range(config.rows):
+        for col in range(config.cols):
+            if row == 0 or row == config.rows - 1 or col == 0 or col == config.cols - 1:
+                indices.append(row_col_to_zone_index(row, col, config))
+    return indices
+
+
+def _center_zone_indices(config: VL53L8CXConfig) -> list[int]:
+    rows = sorted({max(0, (config.rows - 1) // 2), min(config.rows - 1, config.rows // 2)})
+    cols = sorted({max(0, (config.cols - 1) // 2), min(config.cols - 1, config.cols // 2)})
+    return [row_col_to_zone_index(row, col, config) for row in rows for col in cols]
+
+
+def _mean(values: Sequence[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _population_variance(values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    mean = _mean(values)
+    return sum((value - mean) ** 2 for value in values) / len(values)
+
+
+def _signed_zone_difference(
+    zone_means: Sequence[float | None],
+    baseline_zone_means: Sequence[float | None] | None,
+    zone_indices: Sequence[int],
+) -> float:
+    if baseline_zone_means is None:
+        return 0.0
+    differences = [
+        float(zone_means[index]) - float(baseline_zone_means[index])
+        for index in zone_indices
+        if zone_means[index] is not None and baseline_zone_means[index] is not None
+    ]
+    return _mean(differences)
+
+
+def load_flat_csv_zone_means(path: str | Path, config: VL53L8CXConfig, prefix: str = "zone") -> list[float | None]:
+    columns = _zone_columns(prefix, config)
+    sums = [0.0 for _ in range(config.zones)]
+    counts = [0 for _ in range(config.zones)]
+    with Path(path).open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            for index, column in enumerate(columns):
+                value = _safe_float(row.get(column))
+                if value is not None and value > 0.0:
+                    sums[index] += value
+                    counts[index] += 1
+    return [sums[index] / counts[index] if counts[index] else None for index in range(config.zones)]
+
+
+def summarize_flat_csv_for_shape(
+    path: str | Path,
+    config: VL53L8CXConfig,
+    *,
+    shape_id: str,
+    baseline_zone_means: Sequence[float | None] | None = None,
+) -> ShapeComparisonSummary:
+    path = Path(path)
+    zone_columns = _zone_columns("zone", config)
+    intensity_columns = _zone_columns("intensity", config)
+    loss_columns = _zone_columns("optical_loss", config)
+    zone_values: list[float] = []
+    intensity_values: list[float] = []
+    loss_values: list[float] = []
+    valid_zone_counts: list[float] = []
+    frame_count = 0
+
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError(f"{path} is empty or missing a header")
+        missing = [column for column in zone_columns if column not in reader.fieldnames]
+        if missing:
+            raise ValueError(f"{path} is missing zone column {missing[0]}")
+
+        for row in reader:
+            frame_count += 1
+            frame_zone_values: list[float] = []
+            for column in zone_columns:
+                value = _safe_float(row.get(column))
+                if value is not None and value > 0.0:
+                    frame_zone_values.append(value)
+                    zone_values.append(value)
+            valid_zone_counts.append(float(len(frame_zone_values)))
+
+            for column in intensity_columns:
+                value = _safe_float(row.get(column))
+                if value is not None:
+                    intensity_values.append(value)
+
+            for column in loss_columns:
+                value = _safe_float(row.get(column))
+                if value is not None:
+                    loss_values.append(value)
+
+    if frame_count == 0:
+        raise ValueError(f"{path} contains no frames")
+
+    zone_means = load_flat_csv_zone_means(path, config)
+    valid_zone_means = [value for value in zone_means if value is not None]
+    return ShapeComparisonSummary(
+        shape_id=shape_id,
+        csv_path=path,
+        frames=frame_count,
+        mean_distance=round(_mean(zone_values), 6),
+        mean_intensity=round(_mean(intensity_values), 6),
+        valid_zones=round(_mean(valid_zone_counts), 6),
+        spatial_variance=round(_population_variance(valid_zone_means), 6),
+        edge_distortion=round(_signed_zone_difference(zone_means, baseline_zone_means, _edge_zone_indices(config)), 6),
+        center_distortion=round(_signed_zone_difference(zone_means, baseline_zone_means, _center_zone_indices(config)), 6),
+        estimated_optical_loss=round(_mean(loss_values), 6),
+    )
+
+
+def write_shape_comparison_summary(summaries: Sequence[ShapeComparisonSummary], path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "shape_id",
+                "csv_path",
+                "frames",
+                "mean_distance",
+                "mean_intensity",
+                "valid_zones",
+                "spatial_variance",
+                "edge_distortion",
+                "center_distortion",
+                "estimated_optical_loss",
+            ]
+        )
+        for summary in summaries:
+            writer.writerow(
+                [
+                    summary.shape_id,
+                    str(summary.csv_path),
+                    summary.frames,
+                    summary.mean_distance,
+                    summary.mean_intensity,
+                    summary.valid_zones,
+                    summary.spatial_variance,
+                    summary.edge_distortion,
+                    summary.center_distortion,
+                    summary.estimated_optical_loss,
+                ]
+            )
 
 
 def distance_m_to_mm(distance_m: Any, config: VL53L8CXConfig) -> int:
@@ -453,6 +1026,58 @@ def _draw_lidar_rays(
     draw.draw_lines(start_points, end_points, colors, widths)
 
 
+def _draw_silicone_light_paths(
+    profile: SiliconeProfile,
+    config: VL53L8CXConfig,
+    draw: Any,
+    stage: Any,
+    sensor_prim_path: str,
+    Gf: Any,
+    Usd: Any,
+    UsdGeom: Any,
+    line_width: float = 1.5,
+) -> None:
+    prim = stage.GetPrimAtPath(sensor_prim_path)
+    world_transform = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+
+    def to_world(point: tuple[float, float, float]) -> tuple[float, float, float]:
+        world = world_transform.Transform(Gf.Vec3d(*point))
+        return (float(world[0]), float(world[1]), float(world[2]))
+
+    start_points: list[tuple[float, float, float]] = []
+    end_points: list[tuple[float, float, float]] = []
+    colors: list[tuple[float, float, float, float]] = []
+    widths: list[float] = []
+
+    origin = (0.0, 0.0, 0.0)
+    for row in range(config.rows):
+        for col in range(config.cols):
+            ray = zone_ray_direction(row, col, config)
+            plane_t = profile.offset_from_sensor_m / max(ray[0], 1.0e-9)
+            y_m = ray[1] * plane_t
+            z_m = ray[2] * plane_t
+            surface = silicone_surface_sample(profile, y_m, z_m)
+            if not surface.within_aperture:
+                continue
+            surface_point = (surface.x_m, y_m, z_m)
+            refracted = _refract_direction(ray, surface.normal, 1.0, profile.refractive_index)
+            exit_point = _add3(surface_point, _mul3(refracted, profile.thickness_m + 0.05))
+
+            start_points.append(to_world(origin))
+            end_points.append(to_world(surface_point))
+            colors.append((0.1, 0.8, 1.0, 1.0))
+            widths.append(line_width)
+
+            start_points.append(to_world(surface_point))
+            end_points.append(to_world(exit_point))
+            colors.append((1.0, 0.62, 0.12, 1.0))
+            widths.append(line_width)
+
+    draw.clear_lines()
+    if start_points:
+        draw.draw_lines(start_points, end_points, colors, widths)
+
+
 def frame_from_rtx_scan(sensor_frame: dict[str, Any], config: VL53L8CXConfig) -> VL53L8CXFrame:
     """Convert a LidarRtx ``get_current_frame()`` dictionary into a ToF frame."""
 
@@ -513,6 +1138,26 @@ def _optional_path(text: str) -> Path | None:
     return None if text == "" else Path(text)
 
 
+def silicone_profile_from_args(args: argparse.Namespace) -> SiliconeProfile:
+    profile = SiliconeProfile.from_json(args.silicone_profile) if args.silicone_profile else SiliconeProfile()
+    overrides = {
+        "shape": args.silicone_shape,
+        "width_m": args.silicone_width_m,
+        "height_m": args.silicone_height_m,
+        "thickness_m": args.silicone_thickness_m,
+        "radius_m": args.silicone_radius_m,
+        "curvature": args.silicone_curvature,
+        "offset_from_sensor_m": args.silicone_offset_from_sensor_m,
+        "refractive_index": args.silicone_refractive_index,
+        "transparency": args.silicone_transparency,
+        "scattering_strength": args.silicone_scattering_strength,
+        "absorption_strength": args.silicone_absorption_strength,
+        "surface_roughness": args.silicone_surface_roughness,
+        "reflective_inner_coating": args.reflective_inner_coating if args.reflective_inner_coating else None,
+    }
+    return profile.with_overrides(overrides)
+
+
 def _make_test_results_path() -> Path:
     name = datetime.now().strftime("readings_%Y-%m-%d_%H-%M-%S.csv")
     return DEFAULT_TEST_RESULTS_DIR / name
@@ -543,6 +1188,110 @@ def _terminate_visualizer(process: subprocess.Popen[Any]) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=5)
+
+
+def build_silicone_shape_command(
+    args: argparse.Namespace,
+    shape: str,
+    output_dir: str | Path,
+    *,
+    script_path: str | Path | None = None,
+) -> list[str]:
+    output_dir = Path(output_dir)
+    script = Path(script_path) if script_path is not None else Path(__file__).resolve()
+    command = [
+        sys.executable,
+        str(script),
+        "--profile",
+        str(args.profile),
+        "--output_csv",
+        "",
+        "--flat_csv",
+        str(output_dir / f"{shape}.csv"),
+        "--frames",
+        str(args.frames),
+        "--max_sim_ticks",
+        str(args.max_sim_ticks),
+        "--renderer",
+        str(args.renderer),
+        "--scene",
+        str(args.scene),
+        "--target_center_z",
+        str(args.target_center_z),
+        "--motion_amplitude_m",
+        str(args.motion_amplitude_m),
+        "--sensor_xyz",
+        str(args.sensor_xyz),
+        "--sensor_quat_wxyz",
+        str(args.sensor_quat_wxyz),
+        "--silicone_shape",
+        shape,
+    ]
+
+    if args.headless:
+        command.append("--headless")
+    command.append("--debug_draw" if args.debug_draw else "--no_debug_draw")
+    command.append("--print_arrays" if args.print_arrays else "--quiet_arrays")
+    if args.print_payload_debug:
+        command.append("--print_payload_debug")
+    if args.target_distance_m is not None:
+        command.extend(["--target_distance_m", str(args.target_distance_m)])
+    if args.output_npy is not None:
+        command.extend(["--output_npy", str(output_dir / f"{shape}.npy")])
+    if args.silicone_profile is not None:
+        command.extend(["--silicone_profile", str(args.silicone_profile)])
+    if args.show_light_paths:
+        command.append("--show_light_paths")
+    if args.reflective_inner_coating:
+        command.append("--reflective_inner_coating")
+
+    optional_float_args = (
+        ("--silicone_width_m", args.silicone_width_m),
+        ("--silicone_height_m", args.silicone_height_m),
+        ("--silicone_thickness_m", args.silicone_thickness_m),
+        ("--silicone_radius_m", args.silicone_radius_m),
+        ("--silicone_curvature", args.silicone_curvature),
+        ("--silicone_offset_from_sensor_m", args.silicone_offset_from_sensor_m),
+        ("--silicone_refractive_index", args.silicone_refractive_index),
+        ("--silicone_transparency", args.silicone_transparency),
+        ("--silicone_scattering_strength", args.silicone_scattering_strength),
+        ("--silicone_absorption_strength", args.silicone_absorption_strength),
+        ("--silicone_surface_roughness", args.silicone_surface_roughness),
+    )
+    for flag, value in optional_float_args:
+        if value is not None:
+            command.extend([flag, str(value)])
+
+    return command
+
+
+def run_silicone_shape_comparison(args: argparse.Namespace) -> list[ShapeComparisonSummary]:
+    output_dir = Path(args.shape_tests_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_csv = Path(args.shape_summary_csv) if args.shape_summary_csv else output_dir / "summary.csv"
+    config = VL53L8CXConfig.from_json(args.profile)
+
+    baseline_zone_means: list[float | None] | None = None
+    summaries: list[ShapeComparisonSummary] = []
+    for shape in COMPARISON_SILICONE_SHAPES:
+        flat_csv = output_dir / f"{shape}.csv"
+        command = build_silicone_shape_command(args, shape, output_dir)
+        print(f"[silicone-compare] running {shape}: {flat_csv}")
+        subprocess.run(command, check=True)
+        if shape == "flat":
+            baseline_zone_means = load_flat_csv_zone_means(flat_csv, config)
+        summaries.append(
+            summarize_flat_csv_for_shape(
+                flat_csv,
+                config,
+                shape_id=shape,
+                baseline_zone_means=baseline_zone_means,
+            )
+        )
+
+    write_shape_comparison_summary(summaries, summary_csv)
+    print(f"[silicone-compare] wrote summary: {summary_csv}")
+    return summaries
 
 
 def _make_sensor_attributes(
@@ -630,6 +1379,7 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
         carb.settings.get_settings().set_bool("/rtx-transient/stableIds/enabled", True)
 
         config = VL53L8CXConfig.from_json(args.profile)
+        silicone_profile = silicone_profile_from_args(args)
         sensor_translation = np.array(_parse_vec(args.sensor_xyz, 3, "sensor_xyz"), dtype=float)
         sensor_orientation = np.array(_parse_vec(args.sensor_quat_wxyz, 4, "sensor_quat_wxyz"), dtype=float)
 
@@ -650,6 +1400,7 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
         scene_updater = _create_isaac_scene(
             args=args,
             config=config,
+            silicone_profile=silicone_profile,
             stage=stage,
             Gf=Gf,
             Sdf=Sdf,
@@ -685,7 +1436,7 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
         except TypeError:
             sensor.attach_annotator("IsaacCreateRTXLidarScanBuffer")
         ray_draw = None
-        if args.debug_draw:
+        if args.debug_draw or args.show_light_paths:
             sensor.attach_writer("RtxLidarDebugDrawPointCloud")
             ray_draw = _debug_draw.acquire_debug_draw_interface()
 
@@ -730,7 +1481,9 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
                     scene_updater(sim_tick)
                 simulation_app.update()
                 sensor_frame = sensor.get_current_frame()
-                if args.debug_draw and ray_draw is not None and _has_distance_payload(sensor_frame):
+                if args.show_light_paths and ray_draw is not None and silicone_profile.is_enabled:
+                    _draw_silicone_light_paths(silicone_profile, config, ray_draw, stage, "/VL53L8CX", Gf, Usd, UsdGeom)
+                elif args.debug_draw and ray_draw is not None and _has_distance_payload(sensor_frame):
                     _draw_lidar_rays(sensor_frame, ray_draw, stage, "/VL53L8CX", Gf, Usd, UsdGeom)
                 if args.print_payload_debug:
                     _print_frame_summary(sensor_frame)
@@ -744,6 +1497,7 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
                     continue
 
                 frame_index = valid_count
+                frame = apply_silicone_optical_response(frame, config, silicone_profile)
                 frame.distances_mm = np.asarray(frame.distances_mm, dtype=np.int32)
                 if frame.intensities is not None:
                     frame.intensities = np.asarray(frame.intensities, dtype=object)
@@ -781,6 +1535,7 @@ def _create_isaac_scene(
     *,
     args: argparse.Namespace,
     config: VL53L8CXConfig,
+    silicone_profile: SiliconeProfile,
     stage: Any,
     Gf: Any,
     Sdf: Any,
@@ -803,6 +1558,17 @@ def _create_isaac_scene(
         "cable_yellow": _create_material(stage, "/World/Looks/CableYellow", (0.85, 0.66, 0.04), "Default", Gf, Sdf, UsdShade),
         "cable_purple": _create_material(stage, "/World/Looks/CablePurple", (0.28, 0.08, 0.38), "Default", Gf, Sdf, UsdShade),
     }
+
+    if silicone_profile.is_enabled:
+        _create_silicone_shape_geometry(
+            args=args,
+            profile=silicone_profile,
+            stage=stage,
+            Gf=Gf,
+            Sdf=Sdf,
+            UsdGeom=UsdGeom,
+            UsdShade=UsdShade,
+        )
 
     distance = _scene_target_distance_m(args)
     center_z = args.target_center_z
@@ -1010,6 +1776,133 @@ def _create_table_cube_scene(
         )
 
 
+def _create_silicone_shape_geometry(
+    *,
+    args: argparse.Namespace,
+    profile: SiliconeProfile,
+    stage: Any,
+    Gf: Any,
+    Sdf: Any,
+    UsdGeom: Any,
+    UsdShade: Any,
+) -> None:
+    sensor_x, sensor_y, sensor_z = _parse_vec(args.sensor_xyz, 3, "sensor_xyz")
+    opacity = max(profile.transparency * 0.55, 0.18)
+    material = _create_material(
+        stage,
+        "/World/Looks/SiliconeOpticalInterface",
+        (0.58, 0.86, 0.96),
+        "PlexiGlassStandard",
+        Gf,
+        Sdf,
+        UsdShade,
+        opacity=opacity,
+    )
+
+    if profile.shape in ("flat", "cube"):
+        _add_box(
+            stage,
+            f"/World/Silicone/{profile.shape}",
+            center=(sensor_x + profile.offset_from_sensor_m + profile.thickness_m / 2.0, sensor_y, sensor_z),
+            size=(profile.thickness_m, profile.width_m, profile.height_m),
+            material=material,
+            Gf=Gf,
+            UsdGeom=UsdGeom,
+            UsdShade=UsdShade,
+        )
+        return
+
+    _add_silicone_mesh(
+        stage=stage,
+        path=f"/World/Silicone/{profile.shape}",
+        sensor_center=(sensor_x, sensor_y, sensor_z),
+        profile=profile,
+        material=material,
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+
+
+def _add_silicone_mesh(
+    *,
+    stage: Any,
+    path: str,
+    sensor_center: tuple[float, float, float],
+    profile: SiliconeProfile,
+    material: Any,
+    Gf: Any,
+    UsdGeom: Any,
+    UsdShade: Any,
+    resolution: int = 18,
+) -> None:
+    resolution = max(4, resolution)
+    sensor_x, sensor_y, sensor_z = sensor_center
+    half_w = profile.width_m / 2.0
+    half_h = profile.height_m / 2.0
+    front_points: list[tuple[float, float, float]] = []
+    back_points: list[tuple[float, float, float]] = []
+
+    for row in range(resolution):
+        z_local = -half_h + profile.height_m * row / (resolution - 1)
+        for col in range(resolution):
+            y_local = -half_w + profile.width_m * col / (resolution - 1)
+            surface = silicone_surface_sample(profile, y_local, z_local)
+            front_x = sensor_x + surface.x_m
+            front_points.append((front_x, sensor_y + y_local, sensor_z + z_local))
+            back_points.append((front_x + profile.thickness_m, sensor_y + y_local, sensor_z + z_local))
+
+    points = front_points + back_points
+    back_offset = len(front_points)
+
+    def front_index(row: int, col: int) -> int:
+        return row * resolution + col
+
+    def back_index(row: int, col: int) -> int:
+        return back_offset + row * resolution + col
+
+    face_counts: list[int] = []
+    face_indices: list[int] = []
+
+    for row in range(resolution - 1):
+        for col in range(resolution - 1):
+            f00 = front_index(row, col)
+            f01 = front_index(row, col + 1)
+            f10 = front_index(row + 1, col)
+            f11 = front_index(row + 1, col + 1)
+            b00 = back_index(row, col)
+            b01 = back_index(row, col + 1)
+            b10 = back_index(row + 1, col)
+            b11 = back_index(row + 1, col + 1)
+            face_counts.extend((4, 4))
+            face_indices.extend((f00, f01, f11, f10, b10, b11, b01, b00))
+
+    for col in range(resolution - 1):
+        for row0, row1 in ((0, 0), (resolution - 1, resolution - 1)):
+            f0 = front_index(row0, col)
+            f1 = front_index(row1, col + 1)
+            b1 = back_index(row1, col + 1)
+            b0 = back_index(row0, col)
+            face_counts.append(4)
+            face_indices.extend((f0, f1, b1, b0))
+
+    for row in range(resolution - 1):
+        for col0, col1 in ((0, 0), (resolution - 1, resolution - 1)):
+            f0 = front_index(row, col0)
+            f1 = front_index(row + 1, col1)
+            b1 = back_index(row + 1, col1)
+            b0 = back_index(row, col0)
+            face_counts.append(4)
+            face_indices.extend((f0, f1, b1, b0))
+
+    mesh = UsdGeom.Mesh.Define(stage, path)
+    mesh.CreatePointsAttr([Gf.Vec3f(*point) for point in points])
+    mesh.CreateFaceVertexCountsAttr(face_counts)
+    mesh.CreateFaceVertexIndicesAttr(face_indices)
+    mesh.CreateSubdivisionSchemeAttr("none")
+    UsdShade.MaterialBindingAPI(mesh.GetPrim()).Bind(material)
+
+
 def _center_x_from_front_distance(front_distance_m: float, size_x_m: float) -> float:
     return front_distance_m + size_x_m / 2.0
 
@@ -1069,12 +1962,14 @@ def _create_material(
     Gf: Any,
     Sdf: Any,
     UsdShade: Any,
+    opacity: float = 1.0,
 ) -> Any:
     material = UsdShade.Material.Define(stage, path)
     shader = UsdShade.Shader.Define(stage, f"{path}/Shader")
     shader.CreateIdAttr("UsdPreviewSurface")
     shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(*color))
     shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.45)
+    shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(float(_clamp(opacity, 0.0, 1.0)))
     material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
     _apply_nonvisual_material(stage, path, nonvisual_type, Sdf)
     return material
@@ -1192,6 +2087,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--visualizer_python", default="python", help="Python executable used to launch the visualizer.")
     parser.add_argument("--keep_visualizer_open", action="store_true", help="Do not terminate the visualizer when the simulator exits.")
     parser.add_argument(
+        "--compare_silicone_shapes",
+        action="store_true",
+        help="Run the same capture across flat/convex/concave/half_dome/cube/fingertip and summarize the results.",
+    )
+    parser.add_argument(
+        "--shape_tests_dir",
+        type=Path,
+        default=DEFAULT_SHAPE_TESTS_DIR,
+        help="Directory for --compare_silicone_shapes per-shape CSV outputs.",
+    )
+    parser.add_argument(
+        "--shape_summary_csv",
+        type=Path,
+        default=None,
+        help="Optional summary CSV path for --compare_silicone_shapes; defaults to shape_tests_dir/summary.csv.",
+    )
+    parser.add_argument(
         "--scene",
         choices=("cube", "table-cube", "materials", "white", "white-full", "oblique", "moving", "no-target"),
         default="cube",
@@ -1209,6 +2121,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--motion_amplitude_m", type=float, default=0.25, help="Moving-scene sinusoid amplitude.")
     parser.add_argument("--sensor_xyz", default="0,0,0.35", help="Sensor translation as x,y,z meters.")
     parser.add_argument("--sensor_quat_wxyz", default="1,0,0,0", help="Sensor orientation quaternion as w,x,y,z.")
+    parser.add_argument(
+        "--silicone_shape",
+        choices=SUPPORTED_SILICONE_SHAPES,
+        default=None,
+        help="Enable a parametric silicone mold shape in front of the sensor.",
+    )
+    parser.add_argument("--silicone_profile", type=Path, default=None, help="JSON silicone mold/material profile.")
+    parser.add_argument("--silicone_width_m", "--silicone_width", dest="silicone_width_m", type=float, default=None)
+    parser.add_argument("--silicone_height_m", "--silicone_height", dest="silicone_height_m", type=float, default=None)
+    parser.add_argument("--silicone_thickness_m", "--silicone_thickness", dest="silicone_thickness_m", type=float, default=None)
+    parser.add_argument("--silicone_radius_m", "--silicone_radius", dest="silicone_radius_m", type=float, default=None)
+    parser.add_argument("--silicone_curvature", type=float, default=None)
+    parser.add_argument(
+        "--silicone_offset_from_sensor_m",
+        "--silicone_offset_from_sensor",
+        dest="silicone_offset_from_sensor_m",
+        type=float,
+        default=None,
+    )
+    parser.add_argument("--silicone_refractive_index", type=float, default=None)
+    parser.add_argument("--silicone_transparency", type=float, default=None)
+    parser.add_argument("--silicone_scattering_strength", type=float, default=None)
+    parser.add_argument("--silicone_absorption_strength", type=float, default=None)
+    parser.add_argument("--silicone_surface_roughness", type=float, default=None)
+    parser.add_argument("--reflective_inner_coating", action="store_true")
+    parser.add_argument(
+        "--show_light_paths",
+        action="store_true",
+        help="Draw approximate silicone interaction rays instead of raw RTX hit rays.",
+    )
     return parser
 
 
@@ -1219,6 +2161,13 @@ def main() -> None:
         raise SystemExit("--frames must be positive")
     if args.max_sim_ticks < 0:
         raise SystemExit("--max_sim_ticks must be non-negative")
+    if args.compare_silicone_shapes:
+        if args.append_csv:
+            raise SystemExit("--compare_silicone_shapes writes fresh per-shape CSVs; remove --append_csv")
+        if args.launch_visualizer:
+            raise SystemExit("--compare_silicone_shapes does not launch the live visualizer")
+        run_silicone_shape_comparison(args)
+        return
     run_isaac_prototype(args)
 
 

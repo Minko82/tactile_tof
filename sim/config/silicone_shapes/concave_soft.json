@@ -1,0 +1,15 @@
+{
+  "shape": "concave",
+  "width_m": 0.04,
+  "height_m": 0.04,
+  "thickness_m": 0.006,
+  "radius_m": 0.025,
+  "curvature": 1.0,
+  "offset_from_sensor_m": 0.02,
+  "refractive_index": 1.41,
+  "transparency": 0.86,
+  "scattering_strength": 0.2,
+  "absorption_strength": 0.05,
+  "surface_roughness": 0.15,
+  "reflective_inner_coating": false
+}

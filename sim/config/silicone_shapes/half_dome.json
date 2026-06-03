@@ -1,0 +1,15 @@
+{
+  "shape": "half_dome",
+  "width_m": 0.04,
+  "height_m": 0.04,
+  "thickness_m": 0.012,
+  "radius_m": 0.008,
+  "curvature": 2.5,
+  "offset_from_sensor_m": 0.008,
+  "refractive_index": 1.65,
+  "transparency": 0.78,
+  "scattering_strength": 0.35,
+  "absorption_strength": 0.08,
+  "surface_roughness": 0.25,
+  "reflective_inner_coating": false
+}

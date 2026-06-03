@@ -1,0 +1,7 @@
+shape_id,csv_path,frames,mean_distance,mean_intensity,valid_zones,spatial_variance,edge_distortion,center_distortion,estimated_optical_loss
+flat,D:\Machines virtueles\tactile_tof\sim\output\shape_tests\flat.csv,60,1047.91849,2.00961,64.0,4004.057162,0.0,0.0,0.211918
+convex,D:\Machines virtueles\tactile_tof\sim\output\shape_tests\convex.csv,60,1048.76875,2.062593,64.0,4001.924987,1.120833,0.1625,0.19114
+concave,D:\Machines virtueles\tactile_tof\sim\output\shape_tests\concave.csv,60,1046.995833,1.912581,64.0,3990.001823,-1.008333,0.15,0.249968
+half_dome,D:\Machines virtueles\tactile_tof\sim\output\shape_tests\half_dome.csv,60,1049.052865,2.071291,64.0,4026.522522,1.656548,-0.004167,0.187729
+cube,D:\Machines virtueles\tactile_tof\sim\output\shape_tests\cube.csv,60,1047.91901,2.00961,64.0,4002.001214,0.009524,-0.129167,0.211918
+fingertip,D:\Machines virtueles\tactile_tof\sim\output\shape_tests\fingertip.csv,60,1049.002604,2.069011,64.0,4021.843604,1.608333,-0.241667,0.188623
