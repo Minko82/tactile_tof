@@ -68,10 +68,11 @@ The script auto-detects the ESP32's serial port. If multiple ports are found, it
 
 | Color  | Meaning |
 |--------|---------|
-| 🔵 Blue  | Zone is active — bar height = distance in mm (taller = farther) |
-| 🔴 Red   | Touch detected — reading dropped below the calibrated baseline |
-| 🟡 Yellow | Low-confidence reading from the sensor (status 4 or 10) |
-| ⚫ Dark  | No return signal |
+| 🔵 Blue      | Zone is active — bar height = distance in mm (taller = farther) |
+| 🟠 Orange    | Light touch — reading just below the calibrated baseline |
+| 🔴 Red       | Hard touch — the deeper the press, the more red the zone |
+| 🟡 Yellow    | Low-confidence reading from the sensor (status 4 or 10) |
+| ⚫ Dark      | No return signal |
 
 ---
 

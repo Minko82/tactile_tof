@@ -133,9 +133,10 @@ def parse_frame(line: str):
     return distances, poor_mask
 
 # ── Shared state ──────────────────────────────────────────────────────────────
-_lock      = threading.Lock()
-_latest    = None   # np.ndarray shape (64,) or None
-_connected = False
+_lock            = threading.Lock()
+_latest          = None             # np.ndarray shape (64,) or None
+_connected       = False
+_last_valid_dist = np.full(64, np.inf)  # per-zone last valid distance, for too-close synthesis
 
 # ── Calibration state ─────────────────────────────────────────────────────────
 _cal_lock        = threading.Lock()
@@ -177,13 +178,14 @@ def bar_colors(distances, touch_mask, poor_mask, thresholds):
     for i, (dist, is_touch, is_poor) in enumerate(zip(distances, touch_mask, poor_mask)):
         if dist == 0:
             colors.append((0.05, 0.05, 0.16, 0.5))
-        elif is_poor:
-            # Yellow — sensor returned a low-confidence status (4 or 10)
-            colors.append((1.0, 0.88, 0.0, 0.85))
         elif is_touch:
-            # Red — brighter the further below the calibrated baseline (harder press)
+            # Orange → red gradient: light press = orange, hard press = pure red
+            # (includes poor-quality readings — skin/fingertip absorbs IR)
             t = max(0.0, 1.0 - (dist / max(thresholds[i], 1.0)))
-            colors.append((1.0, 0.08 * (1 - t), 0.0, 1.0))
+            colors.append((1.0, 0.6 * (1 - t), 0.0, 1.0))
+        elif is_poor:
+            # Yellow — low-confidence reading, but not below the touch threshold
+            colors.append((1.0, 0.88, 0.0, 0.85))
         else:
             # Blue — proximity; brighter when closer
             t = min(1.0, dist / MAX_RANGE)
@@ -285,18 +287,21 @@ def style_axes(any_touch: bool):
     ax.view_init(elev=28, azim=-60)
 
 def update_heatmap(distances, touch_mask, poor_mask, thresholds):
-    """Update the 2D grid — red for touch, yellow for poor-quality, dark otherwise."""
+    """Update the 2D grid — touch depth heatmap (orange→red), yellow for poor-quality, dark otherwise."""
     rgb = np.zeros((8, 8, 3))
     for i in range(64):
         row, col = i // 8, i % 8
         dist     = distances[i]
         is_touch = touch_mask[i]
         is_poor  = poor_mask[i]
-        if is_poor and dist > 0:
-            rgb[row, col] = [1.0, 0.88, 0.0]   # yellow — low-confidence reading
-        elif is_touch and dist > 0:
+        if is_touch and dist > 0:
+            # t=0: just at threshold (light press) → orange [1.0, 0.6, 0.0]
+            # t=1: fully compressed (hard press)   → red   [1.0, 0.0, 0.0]
+            # includes poor-quality zones — skin/fingertip absorbs IR
             t = max(0.0, 1.0 - (dist / max(thresholds[i], 1.0)))
-            rgb[row, col] = [1.0, 0.08 * (1 - t), 0.0]
+            rgb[row, col] = [1.0, 0.6 * (1 - t), 0.0]
+        elif is_poor and dist > 0:
+            rgb[row, col] = [1.0, 0.88, 0.0]   # yellow — low-confidence, not touching
         else:
             rgb[row, col] = [0.09, 0.09, 0.20]
 
@@ -332,7 +337,7 @@ def _start_calibration(event):
 btn_calibrate.on_clicked(_start_calibration)
 
 def update(_frame_num):
-    global touch_max_mm, _cal_active, _cal_count, _cal_accumulator
+    global touch_max_mm, _cal_active, _cal_count, _cal_accumulator, _last_valid_dist
 
     # ── Calibration progress / completion ─────────────────────────────────────
     with _cal_lock:
@@ -396,11 +401,25 @@ def update(_frame_num):
         poor_mask = np.zeros(64, dtype=bool)
     else:
         distances, poor_mask = data
+        distances = distances.copy()   # copy before mutation — don't touch shared state
+
+        # ── Too-close synthesis ────────────────────────────────────────────────
+        # The VL53L5CX has a minimum detection range (~4 mm). When an object is
+        # pressed within that range the sensor returns 0 (no valid signal), which
+        # would normally render as dark/no-reading. Instead: track the last valid
+        # distance per zone, and if a zone drops to 0 while its last known reading
+        # was at or below its touch threshold, synthesize 1 mm so it still shows
+        # as a maximum-depth press rather than disappearing.
+        valid = distances > 0
+        _last_valid_dist[valid] = distances[valid]
+        too_close = ~valid & ~poor_mask & (_last_valid_dist <= touch_max_mm)
+        distances[too_close] = 1.0
 
     # Primary touch: reading dropped below the calibrated resting baseline.
-    # Poor-quality readings (yellow) are excluded from touch.
-    good_mask     = ~poor_mask
-    primary_touch = good_mask & (distances > 0) & (distances <= touch_max_mm)
+    # Poor-quality readings (status 4/10) are included — skin and fingertips absorb
+    # IR and will often return low-confidence signals even on a valid touch.
+    good_mask     = ~poor_mask   # still used for flex_touch (conservative)
+    primary_touch = (distances > 0) & (distances <= touch_max_mm)
 
     # Hollow-dome flex: when the dome top is pressed, the walls flex outward —
     # zones adjacent to a confirmed-touch zone may read *longer* than their
