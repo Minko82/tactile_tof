@@ -1,3 +1,5 @@
 Arduino/
 SparkFun_VL53L1X_Arduino_Library/
 newton/
+.venv/
+__pycache__/
