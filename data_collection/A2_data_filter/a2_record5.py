@@ -21,7 +21,7 @@ RECORD_SECONDS = 60.0
 PAUSE_S        = 3.0            # settle pause between runs
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "raw_data")
 
-# --- sensor (VL53L5CX 8x8 on ESP32-C6, "D,8,d0..d63" lines over USB serial) ---
+# Sensor: VL53L5CX 8x8 on ESP32-C6, "D,8,d0..d63" lines over USB serial
 SERIAL_PORT = None             # None = auto-detect; or hard-set e.g. "/dev/cu.usbmodem101"
 BAUD        = 115200
 N_ZONES     = 64

@@ -12,14 +12,14 @@ No robot, no sensor -- pure offline analysis. Safe to run anytime.
 """
 import sys, csv, statistics
 
-# --- how to reduce each 8x8 frame to one "peak distance" (mm) ----------------
+# How to reduce each 8x8 frame to one "peak distance" (mm)
 #   center  : the central zone only (continuous, the boresight reading)   [default]
 #   median  : median of all valid zones (robust; note: spatially pre-averages)
 #   closest : the minimum valid distance
 #   mode    : histogram peak in 10 mm bins (coarse -- quantizes, avoid for jitter)
 PEAK_METHOD = "center"
 
-# --- Kalman tuning -----------------------------------------------------------
+# Kalman tuning
 #   R is auto-estimated from the raw signal (sensor noise variance).
 #   Q_OVER_R sets the smoothing: smaller -> more smoothing / more reduction / more lag.
 Q_OVER_R = 1e-3

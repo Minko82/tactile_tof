@@ -1,6 +1,5 @@
 /*
  * VL53L5CX Visualizer Output — ESP32-C6
- * ----------------------------------------
  * Outputs machine-readable FRAME: lines for the Python visualizer.
  * Each frame is one line:
  *   FRAME:18,342,0,200,...   (64 comma-separated raw distance values in mm)

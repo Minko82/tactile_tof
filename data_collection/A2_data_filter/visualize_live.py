@@ -125,7 +125,7 @@ def main():
         th = threading.Thread(target=reader_serial, args=(state, stop, dev), daemon=True)
     th.start()
 
-    # ---- figure ----
+    # Figure
     plt.rcParams.update({"figure.facecolor": "white", "axes.facecolor": "white", "font.size": 11})
     fig = plt.figure(figsize=(15, 5.6))
     gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 2.2], wspace=0.42)

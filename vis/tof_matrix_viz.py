@@ -37,13 +37,12 @@ else:
 
 new_df = pd.DataFrame(columns=['time_stamp', 'data'])
 
-# ---------------- CONFIGURATION ---------------- #
+# Configuration
 # CHANGE THIS to match your Arduino's port
 #SERIAL_PORT = '/dev/cu.usbmodem101'
 #BAUD_RATE = 115200
 # Set the max distance (in mm) for the color scale
-#MAX_DISTANCE_MM = 2000 
-# ----------------------------------------------- #
+#MAX_DISTANCE_MM = 2000
 
 # Initialize Serial Connection
 try:

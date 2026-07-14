@@ -1,6 +1,5 @@
 /*
  * VL53L5CX Touch + Proximity — ESP32-C6
- * ---------------------------------------
  * Reads one distance per zone (8x8).
  * Zones within TOUCH_MAX_MM are classified as TOUCH.
  * Zones beyond that are classified as PROXIMITY.

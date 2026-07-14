@@ -26,7 +26,7 @@ CONTACT_MM, MAD_K, MIN_CONTACT = 4.0, 4.0, 3  # touch = pushed >=4mm below rest,
 ZONE_PITCH_MM = 2.5                    # zone spacing at the surface (for shear in mm)
 
 
-# --------------------------------------------------------- offline calibration fit
+# Offline calibration fit
 def fit_zone_calibration(frames_list, gt_list, degree=CAL_DEGREE, min_samples=200, std_cut=6.0):
     """Per-zone poly raw->mm vs ground truth. -> coeffs (64,deg+1, nan=untrusted), var (64,)."""
     raw = np.concatenate(frames_list); gt = np.concatenate(gt_list)
@@ -42,7 +42,7 @@ def fit_zone_calibration(frames_list, gt_list, degree=CAL_DEGREE, min_samples=20
     return coeffs, var
 
 
-# --------------------------------------------------------------- per-zone IMM (stream)
+# Per-zone IMM (stream)
 class _IMMZone:
     __slots__ = ("r", "x", "P", "mu")
 
@@ -72,7 +72,7 @@ class _IMMZone:
         return float(self.mu[0]*self.x[0][0] + self.mu[1]*self.x[1][0])
 
 
-# ------------------------------------------------------------------ the unified sensor
+# The unified sensor
 class ToFSensor:
     """Real-time 8x8 ToF filter -> {proximity distance, tactile field + force}."""
 
@@ -158,7 +158,7 @@ class ToFSensor:
                     mode="tactile" if is_tactile else "proximity")
 
 
-# ---------------------------------------------------------------------- data loaders
+# Data loaders
 def load_round(folder):
     """A3 round -> (t, frames n x 64 [invalid->nan], gt mm above table)."""
     with open(os.path.join(folder, "tof_log.csv")) as f:

@@ -31,7 +31,6 @@ N_STEPS       = 4                    # 'steps' mode: number of equal steps each 
 STEP_DWELL_S  = 3.0                  # 'steps' mode: hold 3 s at each step
 
 
-# ---------------------------------------------------------------------------
 def send(urscript):
     s = socket.create_connection((ROBOT_IP, 30002), timeout=5)
     s.sendall(urscript.encode()); s.close()
@@ -77,9 +76,7 @@ def dashboard(cmd):
     return resp
 
 
-# ---------------------------------------------------------------------------
-#  COMMANDS
-# ---------------------------------------------------------------------------
+# Commands
 def _init_target_urscript():
     """URScript snippet that builds pose `t` = (current X,Y at HOME_Z) with the
     perpendicular + sensor-straight orientation (the 45 deg is baked in here, so
@@ -194,7 +191,7 @@ def _record_steps_urscript():
         "  gh = run streamer()",
         "  sleep(0.3)",
         f"  sleep({HOLD_SECONDS:.2f})",                        # hold at the top
-        "  i = 0",                                             # --- DOWN in steps ---
+        "  i = 0",                                             # down in steps
         f"  while i < {n_steps}:",
         "    i = i + 1",
         f"    z = {home_z:.5f} - i * {step:.5f}",
@@ -206,7 +203,7 @@ def _record_steps_urscript():
         f"    sleep({STEP_DWELL_S:.2f})",
         "  end",
         f"  sleep({HOLD_SECONDS:.2f})",                        # hold at the bottom
-        "  i = 0",                                             # --- UP in steps ---
+        "  i = 0",                                             # up in steps
         f"  while i < {n_steps}:",
         "    i = i + 1",
         f"    z = {target_z:.5f} + i * {step:.5f}",

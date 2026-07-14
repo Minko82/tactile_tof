@@ -74,7 +74,7 @@ def test_invalid_params_raise():
         assert_raises(ValueError, kf.update, 100.0, bad_dt)
 
 
-# ---- convergence / noise ----------------------------------------------------
+# Convergence / noise
 def test_converges_to_constant():
     kf = KalmanCV()
     for _ in range(300):
@@ -101,7 +101,7 @@ def test_reduces_noise_while_moving():
     assert np.std(est - truth) < np.std(raw - truth)   # denoises even on a ramp
 
 
-# ---- lag-free tracking ------------------------------------------------------
+# Lag-free tracking
 def test_tracks_ramp_without_lag():
     kf = KalmanCV()
     v_true = 30.0
@@ -114,7 +114,7 @@ def test_tracks_ramp_without_lag():
     assert abs(kf.velocity - v_true) < 1.0          # velocity estimate correct
 
 
-# ---- robustness -------------------------------------------------------------
+# Robustness
 def test_rejects_isolated_outlier():
     kf = KalmanCV()
     for _ in range(100):
@@ -306,7 +306,7 @@ def test_stream_helper_matches_manual():
     assert via_stream == manual
 
 
-# ---- performance ------------------------------------------------------------
+# Performance
 def test_realtime_speed():
     kf = KalmanCV()
     n = 20000
@@ -317,7 +317,7 @@ def test_realtime_speed():
     assert per_us < 200.0, f"{per_us:.1f} us/update too slow"   # « a 15 Hz frame (66,667 us)
 
 
-# ---- standalone harness (no pytest needed) ----------------------------------
+# Standalone harness (no pytest needed)
 if __name__ == "__main__":
     import sys
     tests = [(k, v) for k, v in sorted(globals().items())

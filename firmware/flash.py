@@ -2,7 +2,7 @@ import subprocess
 import time
 import os
 
-# --- CONFIGURATION ---
+# Configuration
 arduino_cli_path = "arduino-cli"
 
 # Get absolute path to the current directory
@@ -16,7 +16,7 @@ sparkfun_lib_path = os.path.join(base_dir, "SparkFun_VL53L5CX_Arduino_Library")
 arduino_port = "/dev/cu.usbmodem1101" 
 arduino_board = "esp32:esp32:esp32c6"
 
-# --- COMMANDS ---
+# Commands
 compile_cmd = [
     arduino_cli_path, 
     "compile", 

@@ -36,7 +36,7 @@ def draw_arrow(
     angle = arrow.angle_to(pygame.Vector2(0, -1))
     body_length = arrow.length() - head_height
 
-    # --- HEAD ---
+    # Head
     def make_head(width, height):
         return [
             pygame.Vector2(0, height / 2),
