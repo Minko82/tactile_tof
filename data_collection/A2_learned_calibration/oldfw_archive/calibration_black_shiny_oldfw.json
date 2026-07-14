@@ -1,0 +1,25 @@
+{
+  "coeffs": [
+    -4.366146923804224e-08,
+    8.162764940062829e-05,
+    0.9545264458549084,
+    -13.609003509205118
+  ],
+  "raw_min": 26.0,
+  "raw_max": 640.5,
+  "meta": {
+    "degree": 3,
+    "n": 2195,
+    "rmse_mm": 2.1453894068377957,
+    "max_abs_resid_mm": 9.962572241146802,
+    "fitted_from": [
+      "black_shiny/1",
+      "black_shiny/2",
+      "black_shiny/3",
+      "black_shiny/4",
+      "black_shiny/5"
+    ],
+    "fit_max_speed_mm_s": 100.0,
+    "surface": "black_shiny"
+  }
+}

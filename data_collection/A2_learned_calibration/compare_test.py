@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "A3_proximity"))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "A2_data_filter"))
 
 import robot
-from calibration import load_for_surface
+from calibration import load_for_surface, GenericCalibration
 from live_filter import LiveFilter
 from run_test import PROCESS_ACCEL_PSD, MANEUVER_ACCEL_PSD, REJECT_SIGMA
 
@@ -41,12 +41,14 @@ def main():
     print(f"learned: poly calibration (fit RMSE {cal.meta.get('rmse_mm', float('nan')):.2f} mm) "
           f"+ LiveFilter(q={PROCESS_ACCEL_PSD:.0f}, R=4, {REJECT_SIGMA:.0f}σ gate)")
 
-    # if this surface has no fit yet, say so IN THE PLOT LEGEND, not just the
-    # terminal — a fallback model shows up as a constant bias and is otherwise
-    # easy to misread as "learned is worse"
-    fitted = os.path.exists(os.path.join(HERE, f"calibration_{surf}.json"))
-    learned_name = ("learned" if fitted else
-                    f"learned UNFITTED (using {cal.meta.get('surface', '?')})")
+    # say which model variant is running IN THE PLOT LEGEND, not just the
+    # terminal — a fallback shows up as a bias and is easy to misread
+    if os.path.exists(os.path.join(HERE, f"calibration_{surf}.json")):
+        learned_name = "learned"
+    elif isinstance(cal, GenericCalibration):
+        learned_name = "learned (generic model)"
+    else:
+        learned_name = f"learned UNFITTED (using {cal.meta.get('surface', '?')})"
     pipelines = [
         ("kalman", None, None),        # robot.py defaults = the A3 method
         (learned_name, cal.apply,

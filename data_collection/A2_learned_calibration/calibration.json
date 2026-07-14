@@ -1,25 +1,23 @@
 {
   "coeffs": [
-    -1.6034593037292074e-07,
-    0.00019814086009082018,
-    0.9241538894152864,
-    -15.14787052151397
+    -2.8417358366440556e-07,
+    0.00032065559858971294,
+    0.8841442099525157,
+    1.8152273789131004
   ],
-  "raw_min": 28.0,
-  "raw_max": 645.5,
+  "raw_min": 10.5,
+  "raw_max": 628.5,
   "meta": {
     "degree": 3,
-    "n": 2212,
-    "rmse_mm": 1.8361226285252383,
-    "max_abs_resid_mm": 6.967626480910866,
+    "n": 1320,
+    "rmse_mm": 2.6511205967016136,
+    "max_abs_resid_mm": 10.427419891259717,
     "fitted_from": [
-      "matte_black/1",
-      "matte_black/2",
-      "matte_black/3",
-      "matte_black/4",
-      "matte_black/5"
+      "wood/1",
+      "wood/2",
+      "wood/3"
     ],
     "fit_max_speed_mm_s": 100.0,
-    "surface": "matte_black"
+    "surface": "wood"
   }
 }
