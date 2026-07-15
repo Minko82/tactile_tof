@@ -78,17 +78,7 @@ def draw_arrow(
         head_width: int = 4,
         head_height: int = 2,
     ):
-    """Draw an arrow between start and end with the arrow head at the end.
-
-    Args:
-        surface (pygame.Surface): The surface to draw on
-        start (pygame.Vector2): Start position
-        end (pygame.Vector2): End position
-        color (pygame.Color): Color of the arrow
-        body_width (int, optional): Defaults to 2.
-        head_width (int, optional): Defaults to 4.
-        head_height (float, optional): Defaults to 2.
-    """
+    """draws an arrow from start to end, head at the end"""
     arrow = start - end
     angle = arrow.angle_to(pygame.Vector2(0, -1))
     body_length = arrow.length() - head_height

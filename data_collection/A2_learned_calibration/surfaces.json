@@ -1,0 +1,18 @@
+{
+  "_comment": "Physical surface properties (user-measured, 2026-07-14). thickness_mm raises the surface above the bare table; ground truth in robot logs references the bare table (TABLE_Z_MM measured with the sensor face touching it — the 21 mm mount protrusion past the end effector is therefore already absorbed in TABLE_Z_MM). distance-to-surface-face = truth - thickness_mm.",
+  "mount_protrusion_mm": 21.0,
+  "surfaces": {
+    "white":             {"thickness_mm": 6.5, "notes": "matte white sheet"},
+    "wood":              {"thickness_mm": 7.0, "notes": "light wood sheet"},
+    "black_shiny":       {"thickness_mm": 0.5, "notes": "glossy black sheet, <1mm"},
+    "matte_black":       {"thickness_mm": 0.5, "notes": "matte black sheet, <1mm"},
+    "metal_sheet":       {"thickness_mm": 5.0, "notes": "specular metal"},
+    "black_cardboard":   {"thickness_mm": 5.0, "notes": ""},
+    "cardboard":         {"thickness_mm": 2.0, "notes": ""},
+    "blue":              {"thickness_mm": 3.0, "notes": "blue sheet"},
+    "red_bubblewrap":    {"thickness_mm": 1.0, "notes": "translucent, air pockets"},
+    "white_foamwrapper": {"thickness_mm": 3.0, "notes": "translucent foam"},
+    "white_fabric":      {"thickness_mm": 0.5, "notes": "<1mm"},
+    "texture_towel":     {"thickness_mm": 5.0, "notes": "compliant, textured"}
+  }
+}

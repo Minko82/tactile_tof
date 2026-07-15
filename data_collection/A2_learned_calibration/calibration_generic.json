@@ -1,0 +1,36 @@
+{
+  "type": "generic",
+  "weights": [
+    10.807072095725605,
+    0.8451386265310373,
+    0.00031434427665634143,
+    -2.5451405919077885e-07,
+    -3.9263203232177686,
+    0.005852884230653155,
+    0.19122773412347022
+  ],
+  "raw_min": 6.0,
+  "raw_max": 644.5,
+  "ls_min": 3.2188758248682006,
+  "ls_max": 12.3275577091062,
+  "ls_default": 8.401670093861112,
+  "meta": {
+    "n": 12022,
+    "pools": [
+      "white",
+      "wood",
+      "black_shiny",
+      "matte_black",
+      "metal_sheet",
+      "black_cardboard",
+      "cardboard",
+      "blue",
+      "red_bubblewrap",
+      "white_foamwrapper",
+      "white_fabric",
+      "texture_towel"
+    ],
+    "rmse_mm": 5.4365539842536865,
+    "loso_note": "expect ~4-5 mm RMSE typical on unseen materials"
+  }
+}
