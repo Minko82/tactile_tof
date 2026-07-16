@@ -1,0 +1,11 @@
+{
+  "centered_baseline_iou": 0.16666666666666666,
+  "mesh_pose": {
+    "x_m": -0.0029990256810970266,
+    "y_m": -0.11902378707600735,
+    "yaw_deg": 276.0
+  },
+  "silhouette_iou": 0.41025641025641024,
+  "tcp_to_sensor_z_m": 0.09013161192557785,
+  "zone_transform": "identity"
+}

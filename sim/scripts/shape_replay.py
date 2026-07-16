@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import bisect
 import csv
+import hashlib
 import json
 import math
 import struct
@@ -30,6 +31,11 @@ ZONE_TRANSFORMS = (
     "mirror_rot180",
     "mirror_rot270",
 )
+
+OUTPUT_SCHEMA_VERSION = "shape-replay-v2"
+LEGACY_MATRIX_SCHEMA_VERSION = "shape-replay-matrix-v1"
+DISTANCE_MODES = ("raw", "projected", "comparison")
+DESCENDING_EVALUATION_LABEL = "retrospective validation of the new distance-calibration layer"
 
 
 def _finite_float(value: Any, field_name: str) -> float:
@@ -88,6 +94,7 @@ class ShapeExperimentProfile:
     zone_transform: str = "identity"
     visual_rgb: tuple[float, float, float] = (0.008, 0.008, 0.01)
     nonvisual_material: str = "RubberStandard"
+    distance_calibration: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -100,14 +107,20 @@ class ShapeExperimentProfile:
             raise ValueError("timestamp_lag_ms must be non-negative")
         if self.zone_transform not in ZONE_TRANSFORMS:
             raise ValueError(f"unsupported zone_transform {self.zone_transform!r}")
-        if set(self.directions) != {"ascending", "descending"}:
-            raise ValueError("directions must define exactly ascending and descending")
+        if not self.directions or not set(self.directions).issubset({"ascending", "descending"}):
+            raise ValueError("directions must contain ascending and/or descending")
         norm = math.sqrt(sum(value * value for value in self.sensor_quat_wxyz))
         if abs(norm - 1.0) > 1.0e-5:
             raise ValueError("sensor_quat_wxyz must be normalized")
 
     @classmethod
-    def from_json(cls, path: str | Path, *, require_files: bool = True) -> "ShapeExperimentProfile":
+    def from_json(
+        cls,
+        path: str | Path,
+        *,
+        require_files: bool = True,
+        selected_directions: Sequence[str] = ("ascending", "descending"),
+    ) -> "ShapeExperimentProfile":
         profile_path = Path(path).resolve()
         with profile_path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
@@ -116,7 +129,10 @@ class ShapeExperimentProfile:
         material_data = data.get("material", {})
         direction_data = data.get("directions", {})
         directions: dict[str, DirectionFiles] = {}
-        for direction in ("ascending", "descending"):
+        requested_directions = tuple(str(direction) for direction in selected_directions)
+        if not requested_directions or any(direction not in ("ascending", "descending") for direction in requested_directions):
+            raise ValueError("directions must select ascending and/or descending")
+        for direction in requested_directions:
             values = direction_data.get(direction, {})
             directions[direction] = DirectionFiles(
                 robot_csv=_resolve_path(profile_path, values.get("robot_csv"), f"directions.{direction}.robot_csv"),
@@ -148,6 +164,11 @@ class ShapeExperimentProfile:
             zone_transform=str(data.get("zone_transform", "identity")),
             visual_rgb=_vec(material_data.get("visual_rgb", (0.008, 0.008, 0.01)), 3, "material.visual_rgb"),
             nonvisual_material=str(material_data.get("nonvisual_type", "RubberStandard")),
+            distance_calibration=(
+                _resolve_path(profile_path, data.get("distance_calibration"), "distance_calibration")
+                if data.get("distance_calibration")
+                else None
+            ),
         )
         if require_files:
             paths = [profile.stl_path, profile.sensor_profile]
@@ -157,6 +178,106 @@ class ShapeExperimentProfile:
             if missing:
                 raise FileNotFoundError("missing experiment files: " + ", ".join(missing))
         return profile
+
+
+@dataclass(frozen=True)
+class EmitterAngle:
+    zone: int
+    row: int
+    col: int
+    azimuth_deg: float
+    elevation_deg: float
+
+
+def canonical_emitter_angles(
+    rows: int,
+    cols: int,
+    fov_h_deg: float,
+    fov_v_deg: float,
+) -> tuple[EmitterAngle, ...]:
+    """Return the exact row-major angles authored into the RTX emitter state."""
+
+    if rows <= 0 or cols <= 0:
+        raise ValueError("emitter rows and cols must be positive")
+    half_h = float(fov_h_deg) / 2.0
+    half_v = float(fov_v_deg) / 2.0
+    emitters: list[EmitterAngle] = []
+    for row in range(rows):
+        elevation = half_v - float(fov_v_deg) * row / max(rows - 1, 1)
+        for col in range(cols):
+            azimuth = -half_h + float(fov_h_deg) * col / max(cols - 1, 1)
+            emitters.append(EmitterAngle(row * cols + col, row, col, float(azimuth), float(elevation)))
+    return tuple(emitters)
+
+
+def spherical_ray_from_angles(azimuth_deg: float, elevation_deg: float) -> tuple[float, float, float]:
+    """Return a +X-forward spherical unit ray for authored RTX angles."""
+
+    azimuth = math.radians(float(azimuth_deg))
+    elevation = math.radians(float(elevation_deg))
+    cos_elevation = math.cos(elevation)
+    return (
+        cos_elevation * math.cos(azimuth),
+        cos_elevation * math.sin(azimuth),
+        math.sin(elevation),
+    )
+
+
+def canonical_local_rays(
+    rows: int,
+    cols: int,
+    fov_h_deg: float,
+    fov_v_deg: float,
+) -> tuple[tuple[float, float, float], ...]:
+    return tuple(
+        spherical_ray_from_angles(emitter.azimuth_deg, emitter.elevation_deg)
+        for emitter in canonical_emitter_angles(rows, cols, fov_h_deg, fov_v_deg)
+    )
+
+
+def projection_factors(
+    rows: int,
+    cols: int,
+    fov_h_deg: float,
+    fov_v_deg: float,
+    sensor_forward: Sequence[float] = (1.0, 0.0, 0.0),
+) -> tuple[float, ...]:
+    forward_length = math.sqrt(sum(float(value) ** 2 for value in sensor_forward))
+    if forward_length <= 0.0:
+        raise ValueError("sensor_forward must be non-zero")
+    forward = tuple(float(value) / forward_length for value in sensor_forward)
+    return tuple(sum(ray[axis] * forward[axis] for axis in range(3)) for ray in canonical_local_rays(rows, cols, fov_h_deg, fov_v_deg))
+
+
+def sensor_world_position(profile: ShapeExperimentProfile, tcp_z_m: float) -> tuple[float, float, float]:
+    return (profile.sensor_xy_m[0], profile.sensor_xy_m[1], float(tcp_z_m) - profile.tcp_to_sensor_z_m)
+
+
+def transform_stl_vertex_to_world(
+    vertex: Sequence[float],
+    profile: ShapeExperimentProfile,
+) -> tuple[float, float, float]:
+    """Mirror the USD SourceOrigin -> SourceUnitScale -> ShapePose stack exactly."""
+
+    local_x = (float(vertex[0]) - profile.mesh_origin_source_units[0]) * profile.stl_units_to_m
+    local_y = (float(vertex[1]) - profile.mesh_origin_source_units[1]) * profile.stl_units_to_m
+    local_z = (float(vertex[2]) - profile.mesh_origin_source_units[2]) * profile.stl_units_to_m
+    yaw = math.radians(profile.mesh_pose.yaw_deg)
+    cosine = math.cos(yaw)
+    sine = math.sin(yaw)
+    return (
+        profile.mesh_pose.x_m + cosine * local_x - sine * local_y,
+        profile.mesh_pose.y_m + sine * local_x + cosine * local_y,
+        profile.table_top_z_m + local_z,
+    )
+
+
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -263,7 +384,14 @@ def load_robot_z_csv(path: str | Path) -> list[RobotZSample]:
     return samples
 
 
-def load_tof_csv(path: str | Path, zones: int = 64) -> list[ToFReferenceFrame]:
+def load_tof_csv(
+    path: str | Path,
+    zones: int = 64,
+    *,
+    zone_transform: str = "identity",
+) -> list[ToFReferenceFrame]:
+    """Load real ToF rows and convert them to canonical emitter order once."""
+
     columns = [f"zone_{index:02d}" for index in range(zones)]
     frames: list[ToFReferenceFrame] = []
     with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
@@ -275,11 +403,13 @@ def load_tof_csv(path: str | Path, zones: int = 64) -> list[ToFReferenceFrame]:
             raise ValueError(f"{path} is missing ToF columns: {', '.join(missing)}")
         for row in reader:
             timestamp = str(row["timestamp"]).strip()
+            raw_zones = tuple(int(float(row[column])) for column in columns)
+            canonical_zones = tuple(int(value) for value in transform_zones(raw_zones, zone_transform))
             frames.append(
                 ToFReferenceFrame(
                     timestamp,
                     _seconds(_parse_timestamp(timestamp)),
-                    tuple(int(float(row[column])) for column in columns),
+                    canonical_zones,
                 )
             )
     if not frames:
@@ -309,7 +439,7 @@ def load_replay_samples(profile: ShapeExperimentProfile, direction: str) -> list
         raise ValueError(f"unsupported experiment direction {direction!r}")
     files = profile.directions[direction]
     robot = load_robot_z_csv(files.robot_csv)
-    tof = load_tof_csv(files.tof_csv)
+    tof = load_tof_csv(files.tof_csv, zone_transform=profile.zone_transform)
     lag_s = profile.timestamp_lag_ms / 1000.0
     overlapping: list[tuple[ToFReferenceFrame, float]] = []
     for frame in tof:
@@ -360,6 +490,158 @@ def quaternion_rotate_vector(
         vy + w * ty + (z * tx - x * tz),
         vz + w * tz + (x * ty - y * tx),
     )
+
+
+def quaternion_angular_difference_deg(left: Sequence[float], right: Sequence[float]) -> float:
+    left_norm = math.sqrt(sum(float(value) ** 2 for value in left))
+    right_norm = math.sqrt(sum(float(value) ** 2 for value in right))
+    if left_norm <= 0.0 or right_norm <= 0.0:
+        raise ValueError("orientation quaternions must be non-zero")
+    dot = sum(float(a) * float(b) for a, b in zip(left, right)) / (left_norm * right_norm)
+    return math.degrees(2.0 * math.acos(min(1.0, max(-1.0, abs(dot)))))
+
+
+@dataclass(frozen=True)
+class DistanceCalibration:
+    path: Path
+    training_regime_id: str
+    sensor_profile_sha256: str
+    projection_factors: tuple[float, ...]
+    global_offset_mm: float
+    zone_residuals_mm: tuple[float, ...]
+    support_mask: tuple[bool, ...]
+    fixed_profiles: dict[str, dict[str, Any]]
+    raw: dict[str, Any]
+
+    @classmethod
+    def from_json(cls, path: str | Path) -> "DistanceCalibration":
+        artifact_path = Path(path).resolve()
+        with artifact_path.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if data.get("schema_version") != "vl53l5cx-distance-calibration-v1":
+            raise ValueError(f"unsupported distance-calibration schema in {artifact_path}")
+        geometry = data.get("emitter_geometry", {})
+        parameters = data.get("parameters", {})
+        projection = tuple(float(value) for value in geometry.get("projection_factors", ()))
+        residuals = tuple(float(value) for value in parameters.get("zone_residuals_mm", ()))
+        supported = tuple(bool(value) for value in parameters.get("support_mask", ()))
+        if len(projection) != 64 or len(residuals) != 64 or len(supported) != 64:
+            raise ValueError("distance calibration must contain 64 projection factors, residuals, and support flags")
+        return cls(
+            artifact_path,
+            str(data.get("training_regime_id", "")),
+            str(data.get("sensor_profile", {}).get("sha256", "")),
+            projection,
+            float(parameters.get("global_offset_mm", 0.0)),
+            residuals,
+            supported,
+            dict(data.get("fixed_profiles", {})),
+            data,
+        )
+
+    def validate_for_profile(
+        self,
+        profile: ShapeExperimentProfile,
+        sensor_config: Any,
+        *,
+        strict: bool,
+    ) -> None:
+        if sha256_file(profile.sensor_profile) != self.sensor_profile_sha256:
+            raise ValueError("distance calibration sensor-profile hash does not match the experiment profile")
+        expected_angles = self.raw.get("emitter_geometry", {}).get("angles_deg", [])
+        current_angles = canonical_emitter_angles(
+            int(sensor_config.rows),
+            int(sensor_config.cols),
+            float(sensor_config.fov_h_deg),
+            float(sensor_config.fov_v_deg),
+        )
+        if len(expected_angles) != len(current_angles):
+            raise ValueError("distance calibration emitter count does not match the sensor profile")
+        angle_tolerance = float(
+            self.raw.get("compatibility_tolerances", {}).get("emitter_angle_deg", 1.0e-12)
+        )
+        for expected, current in zip(expected_angles, current_angles):
+            if (
+                abs(float(expected["azimuth_deg"]) - current.azimuth_deg) > angle_tolerance
+                or abs(float(expected["elevation_deg"]) - current.elevation_deg) > angle_tolerance
+            ):
+                raise ValueError("distance calibration emitter geometry does not match the sensor profile")
+        fixed = self.fixed_profiles.get(profile.name)
+        if fixed is None:
+            raise ValueError(f"distance calibration has no fixed-profile entry for {profile.name!r}")
+        mount_tolerance = float(
+            self.raw.get("compatibility_tolerances", {}).get("tcp_to_sensor_z_mm", 0.10)
+        )
+        if abs(float(fixed["tcp_to_sensor_z_m"]) - profile.tcp_to_sensor_z_m) * 1000.0 > mount_tolerance:
+            raise ValueError("distance calibration tcp_to_sensor_z_m is incompatible with the profile")
+        orientation_tolerance = float(
+            self.raw.get("compatibility_tolerances", {}).get("orientation_deg", 0.01)
+        )
+        if quaternion_angular_difference_deg(fixed["sensor_quat_wxyz"], profile.sensor_quat_wxyz) > orientation_tolerance:
+            raise ValueError("distance calibration sensor orientation is incompatible with the profile")
+        if strict and not all(self.support_mask):
+            unsupported = [str(index) for index, value in enumerate(self.support_mask) if not value]
+            raise ValueError("strict distance calibration has unsupported zones: " + ", ".join(unsupported))
+
+
+def _matrix_rows(values: Sequence[Any], rows: int, cols: int) -> list[list[Any]]:
+    return [list(values[start : start + cols]) for start in range(0, rows * cols, cols)]
+
+
+def apply_frame_distance_modes(
+    frame: Any,
+    *,
+    rows: int,
+    cols: int,
+    min_mm: int,
+    max_mm: int,
+    invalid_mm: int,
+    projection: Sequence[float],
+    mode: str,
+    calibration: DistanceCalibration | None = None,
+) -> Any:
+    """Derive integer modes independently from the selected unrounded RTX range."""
+
+    if mode not in ("off", "strict", "diagnostic"):
+        raise ValueError(f"unsupported distance calibration mode {mode!r}")
+    if mode != "off" and calibration is None:
+        raise ValueError(f"distance calibration mode {mode} requires a calibration artifact")
+    ranges = _flatten_auxiliary_matrix(getattr(frame, "rtx_ranges_m", None), rows * cols)
+    validity = _flatten_auxiliary_matrix(getattr(frame, "validity_mask", None), rows * cols)
+    if not ranges or all(value == "" for value in ranges):
+        raise ValueError("shape replay requires unrounded RTX ranges for projection")
+
+    raw_values: list[int] = []
+    projected_values: list[int] = []
+    comparison_values: list[int] = []
+    normalized_validity: list[bool] = []
+    for zone, range_value in enumerate(ranges):
+        valid = bool(validity[zone]) if zone < len(validity) and validity[zone] != "" else range_value not in (None, "")
+        normalized_validity.append(valid)
+        if not valid:
+            raw_values.append(invalid_mm)
+            projected_values.append(invalid_mm)
+            if mode != "off":
+                comparison_values.append(invalid_mm)
+            continue
+        raw_float_mm = float(range_value) * 1000.0
+        projected_float_mm = raw_float_mm * float(projection[zone])
+
+        def convert(value: float) -> int:
+            return min(max(int(round(value)), int(min_mm)), int(max_mm))
+
+        raw_values.append(convert(raw_float_mm))
+        projected_values.append(convert(projected_float_mm))
+        if mode != "off":
+            assert calibration is not None
+            residual = calibration.zone_residuals_mm[zone] if calibration.support_mask[zone] else 0.0
+            comparison_values.append(convert(projected_float_mm + calibration.global_offset_mm + residual))
+
+    frame.distances_mm = _matrix_rows(raw_values, rows, cols)
+    frame.projected_distances_mm = _matrix_rows(projected_values, rows, cols)
+    frame.comparison_distances_mm = _matrix_rows(comparison_values, rows, cols) if mode != "off" else None
+    frame.validity_mask = _matrix_rows(normalized_validity, rows, cols)
+    return frame
 
 
 @dataclass(frozen=True)
@@ -690,6 +972,9 @@ class ShapeReplayRun:
     samples: list[ReplaySample]
     output_dir: Path
     sim_ticks: list[int] = field(default_factory=list)
+    distance_calibration_mode: str = "off"
+    distance_calibration: DistanceCalibration | None = None
+    projection_factors: tuple[float, ...] = ()
 
     @property
     def sensor_prim_path(self) -> str:
@@ -739,11 +1024,35 @@ def _frame_metrics(real: Sequence[int], simulated: Sequence[int]) -> dict[str, f
     }
 
 
+def frame_distance_values(frame: Any, mode: str) -> list[int]:
+    if mode == "raw":
+        matrix = frame.distances_mm
+    elif mode == "projected":
+        matrix = getattr(frame, "projected_distances_mm", None)
+    elif mode == "comparison":
+        matrix = getattr(frame, "comparison_distances_mm", None)
+    else:
+        raise ValueError(f"unsupported simulation distance mode {mode!r}")
+    if matrix is None:
+        raise ValueError(f"simulation distance mode {mode!r} is unavailable")
+    return _flatten_matrix(matrix)
+
+
 def build_comparison(
     samples: Sequence[ReplaySample],
     frames: Sequence[Any],
-    zone_transform: str,
+    zone_transform: str = "identity",
+    *,
+    sim_mode: str = "raw",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Compare canonical real frames with one simulation mode.
+
+    ``zone_transform`` remains in the signature for source compatibility only;
+    real frames are canonicalized exactly once while loading.
+    """
+
+    if zone_transform not in ZONE_TRANSFORMS:
+        raise ValueError(f"unsupported zone transform {zone_transform!r}")
     count = min(len(samples), len(frames))
     rows: list[dict[str, Any]] = []
     zone_errors: list[list[float]] = [[] for _ in range(64)]
@@ -753,8 +1062,8 @@ def build_comparison(
     no_return_ious: list[float] = []
     for index in range(count):
         sample = samples[index]
-        real = [int(value) for value in transform_zones(sample.real_zones_mm, zone_transform)]
-        simulated = _flatten_matrix(frames[index].distances_mm)
+        real = [int(value) for value in sample.real_zones_mm]
+        simulated = frame_distance_values(frames[index], sim_mode)
         metrics = _frame_metrics(real, simulated)
         rows.append(
             {
@@ -785,8 +1094,8 @@ def build_comparison(
         real_values: list[int] = []
         sim_values: list[int] = []
         for index in indices:
-            real_values.extend(int(value) for value in transform_zones(samples[index].real_zones_mm, zone_transform))
-            sim_values.extend(_flatten_matrix(frames[index].distances_mm))
+            real_values.extend(int(value) for value in samples[index].real_zones_mm)
+            sim_values.extend(frame_distance_values(frames[index], sim_mode))
         plateau_summaries.append({"tcp_z_mm": tcp_z_mm, "frames": len(indices), **_frame_metrics(real_values, sim_values)})
     summary = {
         "frames": count,
@@ -798,11 +1107,18 @@ def build_comparison(
         "per_zone_bias_mm": [sum(values) / len(values) if values else None for values in zone_errors],
         "per_zone_paired_samples": [len(values) for values in zone_errors],
         "plateaus": plateau_summaries,
+        "mode": sim_mode,
     }
     return rows, summary
 
 
-def _write_comparison_graph(path: Path, rows: Sequence[dict[str, Any]], summary: dict[str, Any]) -> bool:
+def _write_comparison_graph(
+    path: Path,
+    rows: Sequence[dict[str, Any]],
+    summary: dict[str, Any],
+    *,
+    sim_mode: str = "raw",
+) -> bool:
     """Plot aligned real/sim distance, return coverage, and frame error."""
 
     if not rows:
@@ -827,7 +1143,7 @@ def _write_comparison_graph(path: Path, rows: Sequence[dict[str, Any]], summary:
         [row["sim_mean_distance_mm"] for row in rows],
         color="#E76F51",
         linewidth=1.8,
-        label="Raw RTX simulation",
+        label=f"Simulation ({sim_mode})",
     )
     axes[0].plot(
         elapsed,
@@ -985,6 +1301,8 @@ def _write_heatmaps(
     samples: Sequence[ReplaySample],
     frames: Sequence[Any],
     zone_transform: str,
+    experiment_name: str = "shape",
+    sim_mode: str = "raw",
 ) -> bool:
     count = min(len(samples), len(frames))
     if not count:
@@ -999,12 +1317,12 @@ def _write_heatmaps(
         import matplotlib.pyplot as plt
         import numpy as np
     except ImportError:
-        return _write_dependency_free_heatmaps(path, samples, frames, zone_transform, stable)
+        return _write_dependency_free_heatmaps(path, samples, frames, zone_transform, stable, sim_mode=sim_mode)
     columns = len(stable)
     figure, axes = plt.subplots(2, columns, figsize=(max(3.0 * columns, 8.0), 6.0), squeeze=False)
     for col, (level, indices) in enumerate(stable):
-        real = np.asarray([transform_zones(samples[index].real_zones_mm, zone_transform) for index in indices], dtype=float)
-        sim = np.asarray([_flatten_matrix(frames[index].distances_mm) for index in indices], dtype=float)
+        real = np.asarray([samples[index].real_zones_mm for index in indices], dtype=float)
+        sim = np.asarray([frame_distance_values(frames[index], sim_mode) for index in indices], dtype=float)
         real[real <= 0] = np.nan
         sim[sim <= 0] = np.nan
         for row, (values, label) in enumerate(((real, "real"), (sim, "simulation"))):
@@ -1016,7 +1334,7 @@ def _write_heatmaps(
             axes[row][col].set_title(f"{label}: TCP {level} mm")
             axes[row][col].set_xticks([])
             axes[row][col].set_yticks([])
-    figure.suptitle("Cup experiment: real vs raw RTX plateau averages")
+    figure.suptitle(f"{experiment_name.title()} experiment: real vs {sim_mode} plateau averages")
     figure.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=160)
@@ -1030,6 +1348,8 @@ def _write_dependency_free_heatmaps(
     frames: Sequence[Any],
     zone_transform: str,
     stable: Sequence[tuple[int, list[int]]],
+    *,
+    sim_mode: str = "raw",
 ) -> bool:
     """Write a compact RGB PNG when Matplotlib is unavailable in Isaac Python."""
 
@@ -1051,8 +1371,8 @@ def _write_dependency_free_heatmaps(
         )
 
     for column, (_level, indices) in enumerate(stable):
-        real_rows = [transform_zones(samples[index].real_zones_mm, zone_transform) for index in indices]
-        sim_rows = [_flatten_matrix(frames[index].distances_mm) for index in indices]
+        real_rows = [samples[index].real_zones_mm for index in indices]
+        sim_rows = [frame_distance_values(frames[index], sim_mode) for index in indices]
         for panel_row, rows in enumerate((real_rows, sim_rows)):
             averages: list[float | None] = []
             for zone in range(64):
@@ -1082,63 +1402,173 @@ def _write_dependency_free_heatmaps(
     return True
 
 
+def _format_matrix_values(values: Sequence[int], rows: int = 8, cols: int = 8) -> str:
+    return "[" + ", ".join(
+        "[" + " ".join(str(value) for value in values[start : start + cols]) + "]"
+        for start in range(0, rows * cols, cols)
+    ) + "]"
+
+
+def _write_mode_matrix(path: Path, samples: Sequence[ReplaySample], frames: Sequence[Any], mode: str) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["time_stamp", "data"])
+        for sample, frame in zip(samples, frames):
+            writer.writerow([sample.reference_timestamp, _format_matrix_values(frame_distance_values(frame, mode))])
+
+
 def write_shape_replay_outputs(run: ShapeReplayRun, frames: Sequence[Any]) -> dict[str, Any]:
     run.output_dir.mkdir(parents=True, exist_ok=True)
-    comparison_rows, summary = build_comparison(run.samples, frames, run.profile.zone_transform)
+    available_modes = ["raw", "projected"]
+    if run.distance_calibration_mode != "off":
+        available_modes.append("comparison")
+
+    rows_by_mode: dict[str, list[dict[str, Any]]] = {}
+    metrics_by_mode: dict[str, dict[str, Any]] = {}
+    for mode in available_modes:
+        mode_rows, mode_summary = build_comparison(
+            run.samples,
+            frames,
+            run.profile.zone_transform,
+            sim_mode=mode,
+        )
+        rows_by_mode[mode] = mode_rows
+        metrics_by_mode[mode] = mode_summary
+
+    raw_rows = rows_by_mode["raw"]
+    comparison_rows: list[dict[str, Any]] = []
+    metric_keys = (
+        "real_valid_zones",
+        "sim_valid_zones",
+        "real_mean_distance_mm",
+        "sim_mean_distance_mm",
+        "paired_valid_zones",
+        "mae_mm",
+        "bias_mm",
+        "no_return_iou",
+    )
+    for index, raw_row in enumerate(raw_rows):
+        combined = {
+            "schema_version": OUTPUT_SCHEMA_VERSION,
+            "legacy_top_level_metric_mode": "raw",
+            **raw_row,
+        }
+        for mode in available_modes:
+            for key in metric_keys:
+                combined[f"{mode}_{key}"] = rows_by_mode[mode][index].get(key)
+        comparison_rows.append(combined)
+
     flat_path = run.output_dir / "sim_flat.csv"
     with flat_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
+        mode_columns: list[str] = [f"zone_{index:02d}" for index in range(64)]
+        mode_columns += [f"projected_zone_{index:02d}" for index in range(64)]
+        if "comparison" in available_modes:
+            mode_columns += [f"comparison_zone_{index:02d}" for index in range(64)]
         writer.writerow(
-            ["reference_timestamp", "frame_index", "sim_tick", "elapsed_s", "tcp_z_m", "sensor_z_m", "valid_zones"]
-            + [f"zone_{index:02d}" for index in range(64)]
+            [
+                "schema_version",
+                "reference_timestamp",
+                "frame_index",
+                "sim_tick",
+                "elapsed_s",
+                "tcp_z_m",
+                "sensor_z_m",
+                "valid_zones",
+            ]
+            + [f"valid_{index:02d}" for index in range(64)]
+            + [f"rtx_range_m_{index:02d}" for index in range(64)]
+            + mode_columns
             + [f"intensity_{index:02d}" for index in range(64)]
             + [f"material_{index:02d}" for index in range(64)]
+            + [f"emitter_id_{index:02d}" for index in range(64)]
+            + [f"selected_return_index_{index:02d}" for index in range(64)]
         )
         for index, (sample, frame) in enumerate(zip(run.samples, frames)):
-            zones = _flatten_matrix(frame.distances_mm)
-            intensities = _flatten_auxiliary_matrix(frame.intensities)
-            materials = _flatten_auxiliary_matrix(frame.material_ids)
+            zones = frame_distance_values(frame, "raw")
+            projected = frame_distance_values(frame, "projected")
+            comparison = frame_distance_values(frame, "comparison") if "comparison" in available_modes else []
+            validity = [int(bool(value)) for value in _flatten_auxiliary_matrix(frame.validity_mask)]
+            ranges = _flatten_auxiliary_matrix(frame.rtx_ranges_m)
             writer.writerow(
                 [
+                    OUTPUT_SCHEMA_VERSION,
                     sample.reference_timestamp,
                     index,
                     run.sim_ticks[index] if index < len(run.sim_ticks) else "",
                     sample.elapsed_s,
                     sample.tcp_z_m,
                     sample.sensor_z_m,
-                    sum(value > 0 for value in zones),
+                    sum(validity),
                 ]
+                + validity
+                + ranges
                 + zones
-                + intensities
-                + materials
+                + projected
+                + comparison
+                + _flatten_auxiliary_matrix(frame.intensities)
+                + _flatten_auxiliary_matrix(frame.material_ids)
+                + _flatten_auxiliary_matrix(frame.emitter_ids)
+                + _flatten_auxiliary_matrix(frame.selected_return_indices)
             )
 
     comparison_path = run.output_dir / "comparison.csv"
     with comparison_path.open("w", encoding="utf-8", newline="") as handle:
-        fieldnames = list(comparison_rows[0]) if comparison_rows else ["frame_index"]
+        fieldnames = list(comparison_rows[0]) if comparison_rows else ["schema_version", "frame_index"]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(comparison_rows)
 
-    summary.update(
-        {
-            "experiment": run.profile.name,
-            "direction": run.direction,
-            "zone_transform": run.profile.zone_transform,
-            "mesh_pose": {
-                "x_m": run.profile.mesh_pose.x_m,
-                "y_m": run.profile.mesh_pose.y_m,
-                "yaw_deg": run.profile.mesh_pose.yaw_deg,
-            },
-            "tcp_to_sensor_z_m": run.profile.tcp_to_sensor_z_m,
-            "raw_rtx": True,
-        }
-    )
-    heatmap_written = _write_heatmaps(run.output_dir / "step_heatmaps.png", run.samples, frames, run.profile.zone_transform)
-    summary["step_heatmaps_written"] = heatmap_written
-    summary["comparison_graph_written"] = _write_comparison_graph(
-        run.output_dir / "comparison_graph.png", comparison_rows, summary
-    )
+    _write_mode_matrix(run.output_dir / "sim_projected_matrix.csv", run.samples, frames, "projected")
+    if "comparison" in available_modes:
+        _write_mode_matrix(run.output_dir / "sim_comparison_matrix.csv", run.samples, frames, "comparison")
+
+    summary = {
+        **metrics_by_mode["raw"],
+        "schema_version": OUTPUT_SCHEMA_VERSION,
+        "legacy_matrix_schema_version": LEGACY_MATRIX_SCHEMA_VERSION,
+        "legacy_top_level_metric_mode": "raw",
+        "available_distance_modes": available_modes,
+        "metrics": metrics_by_mode,
+        "experiment": run.profile.name,
+        "direction": run.direction,
+        "evaluation_label": (
+            DESCENDING_EVALUATION_LABEL if run.direction == "descending" else "ascending distance-calibration training data"
+        ),
+        "fixed_profile_provenance": "pre-existing fixed values may contain historical descending provenance",
+        "zone_transform_applied_once_at_real_ingestion": run.profile.zone_transform,
+        "mesh_pose": {
+            "x_m": run.profile.mesh_pose.x_m,
+            "y_m": run.profile.mesh_pose.y_m,
+            "yaw_deg": run.profile.mesh_pose.yaw_deg,
+        },
+        "tcp_to_sensor_z_m": run.profile.tcp_to_sensor_z_m,
+        "distance_calibration_mode": run.distance_calibration_mode,
+        "distance_calibration_artifact": (
+            str(run.distance_calibration.path) if run.distance_calibration is not None else None
+        ),
+        "raw_rtx": True,
+    }
+    graph_results: dict[str, bool] = {}
+    heatmap_results: dict[str, bool] = {}
+    for mode in available_modes:
+        graph_path = run.output_dir / ("comparison_graph.png" if mode == "raw" else f"comparison_graph_{mode}.png")
+        heatmap_path = run.output_dir / ("step_heatmaps.png" if mode == "raw" else f"step_heatmaps_{mode}.png")
+        graph_results[mode] = _write_comparison_graph(
+            graph_path, rows_by_mode[mode], metrics_by_mode[mode], sim_mode=mode
+        )
+        heatmap_results[mode] = _write_heatmaps(
+            heatmap_path,
+            run.samples,
+            frames,
+            run.profile.zone_transform,
+            run.profile.name,
+            sim_mode=mode,
+        )
+    summary["comparison_graphs_written"] = graph_results
+    summary["step_heatmaps_written_by_mode"] = heatmap_results
+    summary["comparison_graph_written"] = graph_results["raw"]
+    summary["step_heatmaps_written"] = heatmap_results["raw"]
     with (run.output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)
         handle.write("\n")

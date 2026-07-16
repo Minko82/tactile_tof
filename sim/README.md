@@ -88,22 +88,25 @@ Run the same capture across all built-in silicone shapes:
 
 The cup preset is `sim/config/shape_experiments/cup.json`. It references the separated `cup.stl`, both real robot/ToF recordings, a 10 Hz 8x8 replay profile matching the recorded CSV cadence, the timestamp lag, the calibrated TCP-to-sensor offset, and one rigid cup pose shared by both directions.
 
-Run the ascending replay in the Isaac Sim GUI:
+Shape replay defaults to `--distance-calibration-mode strict`. The
+`cup_spoon_ascending_v1` support preflight currently fails 64-zone coverage, so
+no strict shared artifact is published. Until a separately versioned flat-target
+regime is collected, use `off` to produce honest raw and projected outputs:
 
 ```powershell
-.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\cup.json" --experiment-direction ascending
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\cup.json" --experiment-direction ascending --distance-calibration-mode off
 ```
 
 Run both directions headlessly. `both` starts a fresh Isaac process for each direction:
 
 ```powershell
-.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --quiet_arrays --no_debug_draw --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\cup.json" --experiment-direction both
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --quiet_arrays --no_debug_draw --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\cup.json" --experiment-direction both --distance-calibration-mode off
 ```
 
 Render only the initial descending setup for photographic comparison, without replacing any CSV outputs:
 
 ```powershell
-.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --quiet_arrays --no_debug_draw --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\cup.json" --experiment-direction descending --experiment-setup-image-only
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --quiet_arrays --no_debug_draw --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\cup.json" --experiment-direction descending --experiment-setup-image-only --distance-calibration-mode off
 ```
 
 This writes `setup_beginning.png` in the direction's output directory. The comparison-camera position, target, and image resolution can be overridden with the corresponding `--experiment-setup-camera-*` and `--experiment-setup-image-resolution` options.
@@ -120,15 +123,18 @@ python sim/scripts/run_vl53l8cx_isaac_tof.py --calibrate-experiment-pose --exper
 
 Calibration writes `sim/output/shape_experiments/cup/calibration.json`. It searches only cup XY translation, yaw, zone-grid orientation, and the fixed TCP-to-sensor offset. It does not alter the STL or synthesize sensor dropout. Copy calibrated values into a profile only after reviewing the reported silhouette score.
 
-Each direction writes under `sim/output/shape_experiments/cup/<direction>/`:
+Each direction uses output schema `shape-replay-v2` and writes under
+`sim/output/shape_experiments/cup/<direction>/`:
 
 ```text
-sim_matrix.csv     legacy time_stamp,data matrices using reference timestamps
-sim_flat.csv       raw zones plus reference timestamp, TCP Z, sensor Z, and RTX auxiliaries
-comparison.csv     aligned per-frame validity, MAE, bias, and no-return IoU
-summary.json       aggregate and per-zone metrics, pose, and raw-RTX marker
-comparison_graph.png real/sim distance, return coverage, and error trends
-step_heatmaps.png  real versus simulated stable-plateau averages
+sim_matrix.csv             legacy v1 raw RTX time_stamp,data matrices
+sim_projected_matrix.csv   projected axial matrices
+sim_comparison_matrix.csv  projection-plus-residual matrices (strict/diagnostic only)
+sim_flat.csv               explicit validity, unrounded rtx_range_m, modes, and selected-return metadata
+comparison.csv             complete-scene raw/projected/comparison frame metrics
+summary.json               nested metrics; legacy top-level fields explicitly alias raw
+comparison_graph*.png      real/simulation trends labelled by distance mode
+step_heatmaps*.png         real/simulation plateau averages labelled by distance mode
 ```
 
 Create a synchronized 1920x1080 MP4 with the real sensor and simulated 8x8
@@ -145,8 +151,59 @@ the real sensor did not; blue zones mean the opposite. To rerun Isaac before
 recording the video, use one command:
 
 ```powershell
-py "C:\PathTo\tactile_tof\sim\scripts\record_shape_comparison.py" --direction descending --rerun-simulation --isaac-python "C:\isaacsim\python.bat"
+py "C:\PathTo\tactile_tof\sim\scripts\record_shape_comparison.py" --direction descending --sim-distance-mode projected --rerun-simulation --distance-calibration-mode off --isaac-python "C:\isaacsim\python.bat"
 ```
+
+`--sim-distance-mode raw|projected|comparison` selects the MP4/visualizer data.
+Requesting `comparison` from an `off` capture fails instead of silently using a
+different mode.
+
+## Shared Ascending Distance Calibration
+
+The explicit training manifest is
+`sim/config/shape_experiments/cup_spoon_ascending_v1.json`. It can reference
+only ascending inputs; the fitter rejects and never opens descending paths.
+Fresh immutable raw/projected captures are created with:
+
+```powershell
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --quiet_arrays --no_debug_draw --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\cup.json" --experiment-direction ascending --experiment-output-dir "C:\PathTo\tactile_tof\sim\output\shape_calibration\cup_spoon_ascending_v1" --distance-calibration-mode off --experiment-immutable-output
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --quiet_arrays --no_debug_draw --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\spoon.json" --experiment-direction ascending --experiment-output-dir "C:\PathTo\tactile_tof\sim\output\shape_calibration\cup_spoon_ascending_v1" --distance-calibration-mode off --experiment-immutable-output
+```
+
+Run the mandatory support-only preflight:
+
+```powershell
+python sim/scripts/fit_shape_distance_calibration.py --training-manifest sim/config/shape_experiments/cup_spoon_ascending_v1.json --mode strict --preflight-only
+```
+
+The current capture fails zones `19, 20, 26-29, 33-37, 43, 44`, so the workflow
+terminates at `sim/output/shape_calibration/cup_spoon_ascending_v1/coverage.json`
+and does not create a calibration artifact. A flat-target capture must start a
+new training-regime ID; it must never be pooled into this manifest.
+
+## Recorded Spoon Experiment
+
+The spoon preset is `sim/config/shape_experiments/spoon.json`. It preserves all
+21,256 source triangles and applies millimetres-to-metres only through the same
+USD transform used by the cup. The resulting dimensions remain exactly
+165.0935 x 34.9250 x 9.5250 mm. One pose and one 90.132 mm TCP-to-sensor offset
+are fitted jointly from the ascending and descending recordings.
+
+Run both spoon directions in fresh Isaac processes:
+
+```powershell
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --quiet_arrays --no_debug_draw --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\spoon.json" --experiment-direction both --distance-calibration-mode off
+```
+
+Create the synchronized real-versus-simulation videos:
+
+```powershell
+py "C:\PathTo\tactile_tof\sim\scripts\record_shape_comparison.py" --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\spoon.json" --direction ascending
+py "C:\PathTo\tactile_tof\sim\scripts\record_shape_comparison.py" --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\spoon.json" --direction descending
+```
+
+The timestamp overlap contains 204 ascending frames and 205 descending frames;
+the recorder preserves these native counts.
 
 The checked-in cup mesh remains in source units. Isaac applies `0.001` on a parent USD transform, preserving its 72,382 triangles and 124.8843 x 102.1417 x 75 mm bounds. To add another shape, copy the cup profile and change the STL, source origin, reference CSVs, material, and calibrated rigid pose.
 

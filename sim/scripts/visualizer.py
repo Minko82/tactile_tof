@@ -19,6 +19,7 @@ from typing import Any
 GRID = 8
 ZONES = GRID * GRID
 ZONE_COLUMNS = [f"zone_{index:02d}" for index in range(ZONES)]
+MODE_PREFIXES = {"raw": "zone", "projected": "projected_zone", "comparison": "comparison_zone"}
 BACKGROUND = "#07071a"
 GRID_COLOR = "#1a1a3a"
 TEXT_COLOR = "#6666cc"
@@ -62,8 +63,13 @@ class DemoSource:
 
 
 class CsvTailSource:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, sim_distance_mode: str = "raw") -> None:
         self.path = Path(path)
+        if sim_distance_mode not in MODE_PREFIXES:
+            raise ValueError(f"unsupported simulation distance mode {sim_distance_mode!r}")
+        self.sim_distance_mode = sim_distance_mode
+        prefix = MODE_PREFIXES[sim_distance_mode]
+        self.zone_columns = [f"{prefix}_{index:02d}" for index in range(ZONES)]
         self._handle: Any | None = None
         self._header: list[str] | None = None
         self._latest: np.ndarray | None = None
@@ -87,9 +93,12 @@ class CsvTailSource:
             if not header_line:
                 return self._latest
             self._header = next(csv.reader([header_line]))
-            missing = [column for column in ZONE_COLUMNS if column not in self._header]
+            missing = [column for column in self.zone_columns if column not in self._header]
             if missing:
-                raise ValueError(f"{self.path} is missing zone columns, first missing: {missing[0]}")
+                raise ValueError(
+                    f"{self.path} does not provide --sim-distance-mode {self.sim_distance_mode}; "
+                    f"first missing column: {missing[0]}"
+                )
 
         assert self._handle is not None
         assert self._header is not None
@@ -115,7 +124,7 @@ class CsvTailSource:
 
         row = dict(zip(self._header, latest_row))
         values = np.zeros(ZONES, dtype=float)
-        for index, column in enumerate(ZONE_COLUMNS):
+        for index, column in enumerate(self.zone_columns):
             try:
                 values[index] = float(row.get(column, 0) or 0)
             except ValueError:
@@ -130,7 +139,7 @@ def create_source(args: argparse.Namespace) -> DemoSource | CsvTailSource:
     if args.source == "csv-tail":
         if args.input_csv is None:
             raise SystemExit("--input_csv is required with --source csv-tail")
-        return CsvTailSource(args.input_csv)
+        return CsvTailSource(args.input_csv, args.sim_distance_mode)
     raise SystemExit("--source serial is not implemented in this simulator visualizer")
 
 
@@ -230,7 +239,10 @@ def run_visualizer(args: argparse.Namespace) -> None:
         mean_mm = float(valid.mean()) if valid_zones else 0.0
         min_mm = int(valid.min()) if valid_zones else 0
         max_seen = int(valid.max()) if valid_zones else 0
-        title = f"VL53L8CX Isaac ToF | valid={valid_zones} | mean={mean_mm:.1f} mm | min={min_mm} | max={max_seen}"
+        title = (
+            f"VL53L8CX Isaac ToF [{args.sim_distance_mode}] | valid={valid_zones} | "
+            f"mean={mean_mm:.1f} mm | min={min_mm} | max={max_seen}"
+        )
 
         ax_3d.cla()
         heights = np.where(latest > 0, np.minimum(latest, args.max_mm), 0.0)
@@ -264,6 +276,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input_csv", type=Path, default=None, help="CSV file to tail when --source csv-tail is used.")
     parser.add_argument("--max_mm", type=float, default=4000.0, help="Distance value mapped to the top of the plot.")
     parser.add_argument("--interval_ms", type=int, default=80, help="Matplotlib refresh interval.")
+    parser.add_argument(
+        "--sim-distance-mode",
+        choices=("raw", "projected", "comparison"),
+        default="raw",
+        help="Distance columns to visualize from a shape-replay v2 CSV.",
+    )
     return parser
 
 

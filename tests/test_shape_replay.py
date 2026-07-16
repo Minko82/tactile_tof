@@ -30,6 +30,7 @@ def load_main_module():
 
 main_module = load_main_module()
 PROFILE_PATH = REPO_ROOT / "sim" / "config" / "shape_experiments" / "cup.json"
+SPOON_PROFILE_PATH = REPO_ROOT / "sim" / "config" / "shape_experiments" / "spoon.json"
 
 
 @dataclass
@@ -37,6 +38,20 @@ class FakeFrame:
     distances_mm: list[list[int]]
     intensities: object | None = None
     material_ids: object | None = None
+    projected_distances_mm: object | None = None
+    comparison_distances_mm: object | None = None
+    rtx_ranges_m: object | None = None
+    validity_mask: object | None = None
+    emitter_ids: object | None = None
+    selected_return_indices: object | None = None
+
+    def __post_init__(self) -> None:
+        if self.projected_distances_mm is None:
+            self.projected_distances_mm = self.distances_mm
+        if self.rtx_ranges_m is None:
+            self.rtx_ranges_m = [[value / 1000.0 if value > 0 else None for value in row] for row in self.distances_mm]
+        if self.validity_mask is None:
+            self.validity_mask = [[value > 0 for value in row] for row in self.distances_mm]
 
 
 class ShapeReplayTests(unittest.TestCase):
@@ -72,6 +87,43 @@ class ShapeReplayTests(unittest.TestCase):
             ascending[50].tcp_z_m - ascending[50].sensor_z_m,
             self.profile.tcp_to_sensor_z_m,
         )
+
+    def test_spoon_profile_preserves_geometry_and_recorded_overlap(self):
+        profile = shape_replay.ShapeExperimentProfile.from_json(SPOON_PROFILE_PATH)
+        mesh = shape_replay.load_stl(profile.stl_path)
+        self.assertEqual(mesh.triangle_count, 21_256)
+        expected_min = (179.2468719482422, 154.77401733398438, 0.0)
+        expected_max = (344.34033203125, 189.6990203857422, 9.524999618530273)
+        for actual, expected in zip(mesh.bounds_min, expected_min):
+            self.assertAlmostEqual(actual, expected, places=6)
+        for actual, expected in zip(mesh.bounds_max, expected_max):
+            self.assertAlmostEqual(actual, expected, places=6)
+        self.assertAlmostEqual(mesh.extents[0] * profile.stl_units_to_m, 0.1650934600830078)
+        self.assertAlmostEqual(mesh.extents[1] * profile.stl_units_to_m, 0.03492500305175781)
+        self.assertAlmostEqual(mesh.extents[2] * profile.stl_units_to_m, 0.009524999618530273)
+
+        ascending = shape_replay.load_replay_samples(profile, "ascending")
+        descending = shape_replay.load_replay_samples(profile, "descending")
+        self.assertEqual(len(ascending), 204)
+        self.assertEqual(len(descending), 205)
+        self.assertLess(ascending[0].tcp_z_m, ascending[-1].tcp_z_m)
+        self.assertGreater(descending[0].tcp_z_m, descending[-1].tcp_z_m)
+        sensor = main_module.VL53L8CXConfig.from_json(profile.sensor_profile)
+        self.assertEqual(sensor.frame_rate_hz, 10.0)
+
+    def test_spoon_calibration_is_shared_and_deterministic(self):
+        profile = shape_replay.ShapeExperimentProfile.from_json(SPOON_PROFILE_PATH)
+        samples = {
+            direction: shape_replay.load_replay_samples(profile, direction)
+            for direction in ("ascending", "descending")
+        }
+        result = shape_replay.calibrate_rigid_pose(profile, samples)
+        self.assertGreater(result.score, result.centered_baseline_score)
+        self.assertAlmostEqual(result.mesh_pose.x_m, -0.0029990256810970266, places=6)
+        self.assertAlmostEqual(result.mesh_pose.y_m, -0.11902378707600735, places=6)
+        self.assertAlmostEqual(result.mesh_pose.yaw_deg, 276.0, places=6)
+        self.assertEqual(result.zone_transform, "identity")
+        self.assertAlmostEqual(result.tcp_to_sensor_z_m, 0.09013161192557785, places=6)
 
     def test_downward_quaternion_and_zone_transforms(self):
         direction = shape_replay.quaternion_rotate_vector(self.profile.sensor_quat_wxyz, (1.0, 0.0, 0.0))
@@ -115,6 +167,8 @@ class ShapeReplayTests(unittest.TestCase):
                     "ascending",
                     "--experiment-output-dir",
                     tmpdir,
+                    "--distance-calibration-mode",
+                    "off",
                 ]
             )
             run = main_module.prepare_shape_replay(args)
@@ -153,10 +207,16 @@ class ShapeReplayTests(unittest.TestCase):
             self.assertTrue((Path(tmpdir) / "summary.json").is_file())
             with (Path(tmpdir) / "sim_flat.csv").open("r", encoding="utf-8", newline="") as handle:
                 header = next(csv.reader(handle))
-            self.assertEqual(header[:7], ["reference_timestamp", "frame_index", "sim_tick", "elapsed_s", "tcp_z_m", "sensor_z_m", "valid_zones"])
+            self.assertEqual(
+                header[:8],
+                ["schema_version", "reference_timestamp", "frame_index", "sim_tick", "elapsed_s", "tcp_z_m", "sensor_z_m", "valid_zones"],
+            )
             with (Path(tmpdir) / "summary.json").open("r", encoding="utf-8") as handle:
                 saved = json.load(handle)
             self.assertTrue(saved["raw_rtx"])
+            self.assertEqual(saved["schema_version"], "shape-replay-v2")
+            self.assertEqual(saved["legacy_top_level_metric_mode"], "raw")
+            self.assertEqual(saved["available_distance_modes"], ["raw", "projected"])
             self.assertTrue(saved["comparison_graph_written"])
             self.assertEqual(output_summary["frames"], 4)
 

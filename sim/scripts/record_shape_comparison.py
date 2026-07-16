@@ -75,10 +75,19 @@ def _optional_number(row: dict[str, str], column: str, number_type: type[int] | 
     return number_type(float(value))
 
 
-def load_zone_frames(path: str | Path) -> list[ZoneFrame]:
+def load_zone_frames(
+    path: str | Path,
+    *,
+    sim_distance_mode: str = "raw",
+    zone_transform: str = "identity",
+) -> list[ZoneFrame]:
     """Load either a real ToF flat CSV or a shape-replay ``sim_flat.csv``."""
 
     path = Path(path)
+    if sim_distance_mode not in visualizer.MODE_PREFIXES:
+        raise ValueError(f"unsupported simulation distance mode {sim_distance_mode!r}")
+    prefix = visualizer.MODE_PREFIXES[sim_distance_mode]
+    zone_columns = [f"{prefix}_{index:02d}" for index in range(ZONES)]
     frames: list[ZoneFrame] = []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -86,22 +95,25 @@ def load_zone_frames(path: str | Path) -> list[ZoneFrame]:
         timestamp_column = "reference_timestamp" if "reference_timestamp" in fieldnames else "timestamp"
         if timestamp_column not in fieldnames:
             raise ValueError(f"{path} is missing a timestamp or reference_timestamp column")
-        missing = [column for column in ZONE_COLUMNS if column not in fieldnames]
+        missing = [column for column in zone_columns if column not in fieldnames]
         if missing:
-            raise ValueError(f"{path} is missing zone columns, first missing: {missing[0]}")
+            raise ValueError(
+                f"{path} does not provide --sim-distance-mode {sim_distance_mode}; "
+                f"first missing column: {missing[0]}"
+            )
 
         for row_number, row in enumerate(reader, start=2):
             timestamp = str(row.get(timestamp_column, "") or "").strip()
             if not timestamp:
                 raise ValueError(f"{path}:{row_number} has an empty timestamp")
             try:
-                zones = tuple(int(float(str(row.get(column, "0") or "0"))) for column in ZONE_COLUMNS)
+                zones = tuple(int(float(str(row.get(column, "0") or "0"))) for column in zone_columns)
             except ValueError as exc:
                 raise ValueError(f"{path}:{row_number} has a non-numeric zone value") from exc
             frames.append(
                 ZoneFrame(
                     timestamp=timestamp,
-                    zones_mm=zones,
+                    zones_mm=transform_zones(zones, zone_transform),
                     frame_index=_optional_number(row, "frame_index", int),
                     elapsed_s=_optional_number(row, "elapsed_s", float),
                     tcp_z_m=_optional_number(row, "tcp_z_m", float),
@@ -143,6 +155,8 @@ def align_frames(
     sim_frames: Sequence[ZoneFrame],
     real_zone_transform: str = "identity",
 ) -> list[AlignedFrame]:
+    if real_zone_transform != "identity":
+        raise ValueError("real zone_transform must be applied exactly once during ingestion")
     real_by_timestamp: dict[str, ZoneFrame] = {}
     for frame in real_frames:
         if frame.timestamp in real_by_timestamp:
@@ -156,15 +170,7 @@ def align_frames(
         if real is None:
             missing.append(sim.timestamp)
             continue
-        transformed_real = ZoneFrame(
-            timestamp=real.timestamp,
-            zones_mm=transform_zones(real.zones_mm, real_zone_transform),
-            frame_index=real.frame_index,
-            elapsed_s=real.elapsed_s,
-            tcp_z_m=real.tcp_z_m,
-            sensor_z_m=real.sensor_z_m,
-        )
-        aligned.append(AlignedFrame(real=transformed_real, sim=sim))
+        aligned.append(AlignedFrame(real=real, sim=sim))
 
     if missing:
         raise ValueError(
@@ -254,6 +260,8 @@ def run_shape_experiment(args: argparse.Namespace) -> None:
         args.direction,
         "--experiment-output-dir",
         str(args.experiment_output_root.resolve()),
+        "--distance-calibration-mode",
+        args.distance_calibration_mode,
     ]
     print("Running descending/ascending Isaac replay before video rendering:")
     print(subprocess.list2cmdline(command))
@@ -450,6 +458,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experiment-output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--real-csv", type=Path, default=None, help="Override the real ToF CSV from the profile.")
     parser.add_argument("--sim-csv", type=Path, default=None, help="Override the generated sim_flat.csv path.")
+    parser.add_argument(
+        "--sim-distance-mode",
+        choices=("raw", "projected", "comparison"),
+        default="raw",
+        help="Simulation distance layer rendered in the comparison video.",
+    )
+    parser.add_argument(
+        "--distance-calibration-mode",
+        choices=("off", "strict", "diagnostic"),
+        default="strict",
+        help="Calibration mode passed to --rerun-simulation.",
+    )
     parser.add_argument("--output-mp4", type=Path, default=None)
     parser.add_argument("--fps", type=float, default=10.0)
     parser.add_argument("--max-mm", type=float, default=500.0, help="Shared distance scale for real and simulation.")
@@ -487,9 +507,9 @@ def main() -> None:
     if not sim_csv.is_file():
         raise SystemExit(f"Simulation CSV was not found: {sim_csv}. Run the shape replay or use --rerun-simulation.")
 
-    real_frames = load_zone_frames(real_csv)
-    sim_frames = load_zone_frames(sim_csv)
-    aligned = align_frames(real_frames, sim_frames, inputs.zone_transform)
+    real_frames = load_zone_frames(real_csv, zone_transform=inputs.zone_transform)
+    sim_frames = load_zone_frames(sim_csv, sim_distance_mode=args.sim_distance_mode)
+    aligned = align_frames(real_frames, sim_frames)
     if args.frame_limit:
         aligned = aligned[: args.frame_limit]
     output_path = (
@@ -505,7 +525,10 @@ def main() -> None:
         max_mm=args.max_mm,
         error_max_mm=args.error_max_mm,
         dpi=args.dpi,
-        title=f"{inputs.experiment_name.upper()} {args.direction.upper()} — REAL vs SIMULATION",
+        title=(
+            f"{inputs.experiment_name.upper()} {args.direction.upper()} — REAL vs SIMULATION "
+            f"[{args.sim_distance_mode.upper()}]"
+        ),
         ffmpeg_path=args.ffmpeg_path,
     )
 

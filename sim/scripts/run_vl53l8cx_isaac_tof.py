@@ -232,6 +232,12 @@ class VL53L8CXFrame:
     surface_angles_deg: Any | None = None
     ray_deviation_deg: Any | None = None
     shape_id: str | None = None
+    rtx_ranges_m: Any | None = None
+    validity_mask: Any | None = None
+    emitter_ids: Any | None = None
+    selected_return_indices: Any | None = None
+    projected_distances_mm: Any | None = None
+    comparison_distances_mm: Any | None = None
 
     def csv_row(self) -> list[str]:
         return [self.timestamp, format_matrix_for_csv(self.distances_mm)]
@@ -320,15 +326,14 @@ def _add3(
 
 
 def zone_ray_direction(row: int, col: int, config: VL53L8CXConfig) -> tuple[float, float, float]:
-    """Return the unit ray direction for one +X-facing VL53L8CX zone."""
+    """Return the canonical spherical +X-facing ray authored into RTX."""
 
     if row < 0 or row >= config.rows or col < 0 or col >= config.cols:
         raise ValueError(f"row/col ({row}, {col}) outside {config.rows}x{config.cols}")
-    half_h = config.fov_h_deg / 2.0
-    half_v = config.fov_v_deg / 2.0
-    azimuth = -half_h + (config.fov_h_deg * col / max(config.cols - 1, 1))
-    elevation = half_v - (config.fov_v_deg * row / max(config.rows - 1, 1))
-    return _normalize3((1.0, math.tan(math.radians(azimuth)), math.tan(math.radians(elevation))))
+    emitter = shape_replay.canonical_emitter_angles(
+        config.rows, config.cols, config.fov_h_deg, config.fov_v_deg
+    )[row * config.cols + col]
+    return shape_replay.spherical_ray_from_angles(emitter.azimuth_deg, emitter.elevation_deg)
 
 
 def silicone_surface_sample(profile: SiliconeProfile, y_m: float, z_m: float) -> SiliconeSurfaceSample:
@@ -881,6 +886,84 @@ def _empty_matrix(rows: int, cols: int, fill: Any = 0) -> list[list[Any]]:
     return [[fill for _ in range(cols)] for _ in range(rows)]
 
 
+@dataclass(frozen=True)
+class SelectedReturnMatrices:
+    distances_mm: list[list[int]]
+    ranges_m: list[list[float | None]]
+    validity_mask: list[list[bool]]
+    intensities: list[list[float | None]] | None
+    material_ids: list[list[int | None]] | None
+    emitter_ids: list[list[int | None]]
+    return_indices: list[list[int | None]]
+
+
+def select_returns_by_emitter(
+    distances_m: Sequence[Any],
+    config: VL53L8CXConfig,
+    emitter_ids: Sequence[Any] | None = None,
+    intensities: Sequence[Any] | None = None,
+    material_ids: Sequence[Any] | None = None,
+) -> SelectedReturnMatrices:
+    """Select the closest original floating-point return for every emitter."""
+
+    distances = list(distances_m)
+    raw_emitter_ids = list(emitter_ids) if emitter_ids is not None else list(range(min(len(distances), config.zones)))
+    if emitter_ids is None:
+        zone_indices: list[int | None] = list(range(min(len(distances), config.zones)))
+    else:
+        zone_indices = emitter_ids_to_zone_indices(raw_emitter_ids, config)
+    intensity_values = list(intensities) if intensities is not None else None
+    material_values = list(material_ids) if material_ids is not None else None
+
+    ranges = _empty_matrix(config.rows, config.cols, None)
+    valid = _empty_matrix(config.rows, config.cols, False)
+    intensity_matrix = _empty_matrix(config.rows, config.cols, None) if intensity_values is not None else None
+    material_matrix = _empty_matrix(config.rows, config.cols, None) if material_values is not None else None
+    emitter_matrix = _empty_matrix(config.rows, config.cols, None)
+    return_index_matrix = _empty_matrix(config.rows, config.cols, None)
+
+    for return_index, zone_index in enumerate(zone_indices):
+        if zone_index is None or return_index >= len(distances):
+            continue
+        try:
+            distance_m = float(distances[return_index])
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(distance_m) or distance_m <= 0.0:
+            continue
+        row, col = zone_index_to_row_col(zone_index, config)
+        previous = ranges[row][col]
+        if previous is not None and distance_m >= previous:
+            continue
+        ranges[row][col] = distance_m
+        valid[row][col] = True
+        emitter_matrix[row][col] = int(raw_emitter_ids[return_index]) if return_index < len(raw_emitter_ids) else zone_index
+        return_index_matrix[row][col] = return_index
+        if intensity_matrix is not None and intensity_values is not None:
+            intensity_matrix[row][col] = (
+                float(intensity_values[return_index]) if return_index < len(intensity_values) else None
+            )
+        if material_matrix is not None and material_values is not None:
+            material_matrix[row][col] = (
+                int(material_values[return_index]) if return_index < len(material_values) else None
+            )
+
+    distance_matrix = _empty_matrix(config.rows, config.cols, config.invalid_mm)
+    for row in range(config.rows):
+        for col in range(config.cols):
+            if valid[row][col]:
+                distance_matrix[row][col] = distance_m_to_mm(ranges[row][col], config)
+    return SelectedReturnMatrices(
+        distance_matrix,
+        ranges,
+        valid,
+        intensity_matrix,
+        material_matrix,
+        emitter_matrix,
+        return_index_matrix,
+    )
+
+
 def build_distance_matrix_from_returns(
     distances_m: Sequence[Any],
     config: VL53L8CXConfig,
@@ -894,34 +977,14 @@ def build_distance_matrix_from_returns(
     kept. Missing zones remain ``config.invalid_mm``.
     """
 
-    distances = list(distances_m)
-    if emitter_ids is None:
-        zone_indices: list[int | None] = list(range(min(len(distances), config.zones)))
-    else:
-        zone_indices = emitter_ids_to_zone_indices(list(emitter_ids), config)
-
-    intensity_values = list(intensities) if intensities is not None else None
-    material_values = list(material_ids) if material_ids is not None else None
-    distance_matrix = _empty_matrix(config.rows, config.cols, config.invalid_mm)
-    intensity_matrix = _empty_matrix(config.rows, config.cols, None) if intensity_values is not None else None
-    material_matrix = _empty_matrix(config.rows, config.cols, None) if material_values is not None else None
-
-    for return_index, zone_index in enumerate(zone_indices):
-        if zone_index is None or return_index >= len(distances):
-            continue
-        distance_mm = distance_m_to_mm(distances[return_index], config)
-        if distance_mm == config.invalid_mm:
-            continue
-        row, col = zone_index_to_row_col(zone_index, config)
-        previous = distance_matrix[row][col]
-        if previous == config.invalid_mm or distance_mm < previous:
-            distance_matrix[row][col] = distance_mm
-            if intensity_matrix is not None and intensity_values is not None and return_index < len(intensity_values):
-                intensity_matrix[row][col] = float(intensity_values[return_index])
-            if material_matrix is not None and material_values is not None and return_index < len(material_values):
-                material_matrix[row][col] = int(material_values[return_index])
-
-    return distance_matrix, intensity_matrix, material_matrix
+    selected = select_returns_by_emitter(
+        distances_m,
+        config,
+        emitter_ids=emitter_ids,
+        intensities=intensities,
+        material_ids=material_ids,
+    )
+    return selected.distances_mm, selected.intensities, selected.material_ids
 
 
 def _array_to_list(value: Any) -> list[Any]:
@@ -1097,7 +1160,7 @@ def frame_from_rtx_scan(sensor_frame: dict[str, Any], config: VL53L8CXConfig) ->
     emitter_ids = _array_to_list(payload.get("emitterId")) or None
     intensities = _array_to_list(payload.get("intensity")) or None
     material_ids = _array_to_list(payload.get("materialId")) or None
-    matrix, intensity_matrix, material_matrix = build_distance_matrix_from_returns(
+    selected = select_returns_by_emitter(
         distances,
         config,
         emitter_ids=emitter_ids,
@@ -1106,9 +1169,13 @@ def frame_from_rtx_scan(sensor_frame: dict[str, Any], config: VL53L8CXConfig) ->
     )
     return VL53L8CXFrame(
         timestamp=datetime.now().time().isoformat(timespec="microseconds"),
-        distances_mm=matrix,
-        intensities=intensity_matrix,
-        material_ids=material_matrix,
+        distances_mm=selected.distances_mm,
+        intensities=selected.intensities,
+        material_ids=selected.material_ids,
+        rtx_ranges_m=selected.ranges_m,
+        validity_mask=selected.validity_mask,
+        emitter_ids=selected.emitter_ids,
+        selected_return_indices=selected.return_indices,
     )
 
 
@@ -1320,19 +1387,13 @@ def _make_sensor_attributes(
     half_h = config.fov_h_deg / 2.0
     half_v = config.fov_v_deg / 2.0
 
-    azimuths: list[float] = []
-    elevations: list[float] = []
-    channel_ids: list[int] = []
-    fire_times: list[int] = []
-
-    for row in range(config.rows):
-        elevation = half_v - (config.fov_v_deg * row / max(config.rows - 1, 1))
-        for col in range(config.cols):
-            azimuth = -half_h + (config.fov_h_deg * col / max(config.cols - 1, 1))
-            azimuths.append(float(azimuth))
-            elevations.append(float(elevation))
-            channel_ids.append(row * config.cols + col + 1)
-            fire_times.append(0)
+    emitters = shape_replay.canonical_emitter_angles(
+        config.rows, config.cols, config.fov_h_deg, config.fov_v_deg
+    )
+    azimuths = [emitter.azimuth_deg for emitter in emitters]
+    elevations = [emitter.elevation_deg for emitter in emitters]
+    channel_ids = [emitter.zone + 1 for emitter in emitters]
+    fire_times = [0 for _ in emitters]
 
     attrs = {
         "omni:sensor:Core:scanRateBaseHz": config.frame_rate_hz,
@@ -1586,7 +1647,23 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
                     frame.timestamp = reference.reference_timestamp
                     shape_run.sim_ticks.append(sim_tick)
                 frame = apply_silicone_optical_response(frame, config, silicone_profile)
+                if shape_run is not None:
+                    frame = shape_replay.apply_frame_distance_modes(
+                        frame,
+                        rows=config.rows,
+                        cols=config.cols,
+                        min_mm=config.min_mm,
+                        max_mm=config.max_mm,
+                        invalid_mm=config.invalid_mm,
+                        projection=shape_run.projection_factors,
+                        mode=shape_run.distance_calibration_mode,
+                        calibration=shape_run.distance_calibration,
+                    )
                 frame.distances_mm = np.asarray(frame.distances_mm, dtype=np.int32)
+                if frame.projected_distances_mm is not None:
+                    frame.projected_distances_mm = np.asarray(frame.projected_distances_mm, dtype=np.int32)
+                if frame.comparison_distances_mm is not None:
+                    frame.comparison_distances_mm = np.asarray(frame.comparison_distances_mm, dtype=np.int32)
                 if frame.intensities is not None:
                     frame.intensities = np.asarray(frame.intensities, dtype=object)
                 if frame.material_ids is not None:
@@ -2328,7 +2405,41 @@ def prepare_shape_replay(args: argparse.Namespace) -> shape_replay.ShapeReplayRu
     if args.experiment_max_frames > 0:
         samples = samples[: args.experiment_max_frames]
     output_dir = Path(args.experiment_output_dir) / profile.name / args.experiment_direction
-    run = shape_replay.ShapeReplayRun(profile, args.experiment_direction, samples, output_dir)
+    if args.experiment_immutable_output and output_dir.exists() and any(output_dir.iterdir()):
+        raise ValueError(f"immutable shape-replay output already exists: {output_dir}")
+    sensor_config = VL53L8CXConfig.from_json(profile.sensor_profile)
+    computed_projection = shape_replay.projection_factors(
+        sensor_config.rows,
+        sensor_config.cols,
+        sensor_config.fov_h_deg,
+        sensor_config.fov_v_deg,
+    )
+    calibration = None
+    if args.distance_calibration_mode != "off":
+        calibration_path = args.distance_calibration or profile.distance_calibration
+        if calibration_path is None:
+            raise ValueError(
+                f"--distance-calibration-mode {args.distance_calibration_mode} requires "
+                "--distance-calibration or a profile distance_calibration field"
+            )
+        calibration = shape_replay.DistanceCalibration.from_json(calibration_path)
+        calibration.validate_for_profile(
+            profile,
+            sensor_config,
+            strict=args.distance_calibration_mode == "strict",
+        )
+        for zone, (stored, computed) in enumerate(zip(calibration.projection_factors, computed_projection)):
+            if abs(stored - computed) > 1.0e-12:
+                raise ValueError(f"distance calibration projection factor mismatch at zone {zone}")
+    run = shape_replay.ShapeReplayRun(
+        profile,
+        args.experiment_direction,
+        samples,
+        output_dir,
+        distance_calibration_mode=args.distance_calibration_mode,
+        distance_calibration=calibration,
+        projection_factors=tuple(computed_projection),
+    )
     args.shape_replay_run = run
     args.profile = profile.sensor_profile
     args.frames = len(samples)
@@ -2455,6 +2566,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_EXPERIMENT_OUTPUT_DIR,
         help="Root directory for aligned shape-replay outputs.",
+    )
+    parser.add_argument(
+        "--distance-calibration-mode",
+        choices=("off", "strict", "diagnostic"),
+        default="strict",
+        help="Distance layer: off writes raw/projected only; strict/diagnostic load a shared artifact.",
+    )
+    parser.add_argument(
+        "--distance-calibration",
+        type=Path,
+        default=None,
+        help="Override the shared distance-calibration artifact referenced by the experiment profile.",
+    )
+    parser.add_argument(
+        "--experiment-immutable-output",
+        action="store_true",
+        help="Refuse to replace a non-empty shape-replay output directory (required for training captures).",
     )
     parser.add_argument(
         "--experiment-max-frames",

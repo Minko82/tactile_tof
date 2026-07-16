@@ -72,6 +72,26 @@ class ShapeComparisonVideoTests(unittest.TestCase):
         self.assertEqual(video.transform_zones(values, "rot180")[0], 63)
         self.assertEqual(video.transform_zones(values, "mirror")[:8], tuple(reversed(range(8))))
 
+    def test_distance_mode_columns_and_one_time_real_ingestion(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            real_path = root / "real.csv"
+            sim_path = root / "sim.csv"
+            values = list(range(64))
+            self.write_flat_csv(real_path, "timestamp", [("t", values)])
+            with sim_path.open("w", encoding="utf-8", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["reference_timestamp"] + [f"projected_zone_{zone:02d}" for zone in range(64)])
+                writer.writerow(["t"] + list(reversed(values)))
+            real = video.load_zone_frames(real_path, zone_transform="mirror")
+            sim = video.load_zone_frames(sim_path, sim_distance_mode="projected")
+            aligned = video.align_frames(real, sim)
+            self.assertEqual(aligned[0].real.zones_mm[:8], tuple(reversed(range(8))))
+            with self.assertRaisesRegex(ValueError, "applied exactly once"):
+                video.align_frames(real, sim, "mirror")
+            with self.assertRaisesRegex(ValueError, "does not provide"):
+                video.load_zone_frames(sim_path, sim_distance_mode="comparison")
+
 
 if __name__ == "__main__":
     unittest.main()

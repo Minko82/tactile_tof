@@ -1,0 +1,38 @@
+{
+  "schema_version": "shape-distance-training-manifest-v1",
+  "training_regime_id": "cup_spoon_ascending_v1",
+  "entries": [
+    {
+      "name": "cup",
+      "direction": "ascending",
+      "profile": "cup.json",
+      "robot_csv": "../../../data_collection/shapes/cup_ascending/ur5_cup_ascending_10_iteration_0.03_inc.csv",
+      "real_tof_csv": "../../../data_collection/shapes/cup_ascending/vl53l5cx_cup_ascending_10_iteration_0.03.csv",
+      "simulation_csv": "../../output/shape_calibration/cup_spoon_ascending_v1/cup/ascending/sim_flat.csv"
+    },
+    {
+      "name": "spoon",
+      "direction": "ascending",
+      "profile": "spoon.json",
+      "robot_csv": "../../../data_collection/shapes/spoon_ascending/ur5_spoon_ascending_10_iteration_0.03_inc.csv",
+      "real_tof_csv": "../../../data_collection/shapes/spoon_ascending/vl53l5cx_spoon_ascending_10_iteration_0.03_inc.csv",
+      "simulation_csv": "../../output/shape_calibration/cup_spoon_ascending_v1/spoon/ascending/sim_flat.csv"
+    }
+  ],
+  "settings": {
+    "max_timestamp_gap_s": 0.25,
+    "max_adjacent_tcp_delta_mm": 0.75,
+    "min_plateau_frames": 4,
+    "max_plateau_range_mm": 2.5,
+    "max_abs_plateau_slope_mm_s": 1.0,
+    "table_gate_mm": 18.0,
+    "object_clearance_m": 0.005,
+    "min_cell_frames": 4,
+    "min_heights_per_shape": 3,
+    "min_total_height_groups": 8,
+    "bootstrap_samples": 2000,
+    "bootstrap_seed": 0
+  },
+  "output_artifact": "shared_vl53l5cx_cup_spoon_ascending_v1.json",
+  "coverage_report": "../../output/shape_calibration/cup_spoon_ascending_v1/coverage.json"
+}
