@@ -22,8 +22,10 @@ import csv
 import json
 import math
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1147,6 +1149,13 @@ def _optional_path(text: str) -> Path | None:
     return None if text == "" else Path(text)
 
 
+def _parse_resolution(text: str) -> tuple[int, int]:
+    values = [int(part.strip()) for part in text.split(",") if part.strip()]
+    if len(values) != 2 or any(value <= 0 for value in values):
+        raise argparse.ArgumentTypeError("resolution must contain two positive comma-separated integers")
+    return (values[0], values[1])
+
+
 def silicone_profile_from_args(args: argparse.Namespace) -> SiliconeProfile:
     profile = SiliconeProfile.from_json(args.silicone_profile) if args.silicone_profile else SiliconeProfile()
     overrides = {
@@ -1356,6 +1365,45 @@ def _make_sensor_attributes(
     return attrs
 
 
+def _capture_shape_replay_setup_image(
+    args: argparse.Namespace,
+    run: shape_replay.ShapeReplayRun,
+    simulation_app: Any,
+) -> Path:
+    """Render the initial replay pose from a repeatable comparison camera."""
+
+    import omni.replicator.core as rep
+
+    camera_position = _parse_vec(args.experiment_setup_camera_position, 3, "experiment setup camera position")
+    camera_target = _parse_vec(args.experiment_setup_camera_target, 3, "experiment setup camera target")
+    output_path = run.output_dir / "setup_beginning.png"
+    run.output_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="setup_capture_", dir=run.output_dir) as temporary_directory:
+        camera = rep.create.camera(
+            position=tuple(camera_position),
+            look_at=tuple(camera_target),
+            clipping_range=(0.01, 100.0),
+            name="ShapeReplaySetupCamera",
+        )
+        render_product = rep.create.render_product(camera, args.experiment_setup_image_resolution)
+        writer = rep.WriterRegistry.get("BasicWriter")
+        writer.initialize(output_dir=temporary_directory, rgb=True)
+        writer.attach(render_product)
+        for _ in range(20):
+            simulation_app.update()
+        try:
+            rep.orchestrator.step()
+            rep.orchestrator.wait_until_complete()
+        finally:
+            writer.detach()
+        images = sorted(Path(temporary_directory).rglob("rgb*.png"))
+        if not images:
+            raise RuntimeError("Replicator did not produce the requested setup image")
+        shutil.copy2(images[-1], output_path)
+    print(f"[shape-replay] wrote initial setup image: {output_path}")
+    return output_path
+
+
 def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
     """Run the Isaac Sim RTX sensor prototype.
 
@@ -1464,6 +1512,10 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
         timeline.play()
         for _ in range(30):
             simulation_app.update()
+        if shape_run is not None and args.experiment_setup_image_only:
+            _capture_shape_replay_setup_image(args, shape_run, simulation_app)
+            timeline.stop()
+            return []
 
         frames: list[VL53L8CXFrame] = []
         csv_writer_context = VL53L8CXCsvWriter(args.output_csv, append=args.append_csv) if args.output_csv else None
@@ -2413,6 +2465,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Optional cap for shape-replay smoke tests; 0 captures the complete overlap.",
     )
     parser.add_argument(
+        "--experiment-setup-image-only",
+        "--experiment_setup_image_only",
+        dest="experiment_setup_image_only",
+        action="store_true",
+        help="Render setup_beginning.png at the initial replay pose without capturing or replacing CSV outputs.",
+    )
+    parser.add_argument(
+        "--experiment-setup-camera-position",
+        default="0.52,-0.28,0.42",
+        help="Comparison-camera position as x,y,z meters.",
+    )
+    parser.add_argument(
+        "--experiment-setup-camera-target",
+        default="0,0.03,0.30",
+        help="Comparison-camera look-at point as x,y,z meters.",
+    )
+    parser.add_argument(
+        "--experiment-setup-image-resolution",
+        type=_parse_resolution,
+        default=(1024, 1536),
+        help="Saved setup image resolution as width,height pixels.",
+    )
+    parser.add_argument(
         "--calibrate-experiment-pose",
         "--calibrate_experiment_pose",
         dest="calibrate_experiment_pose",
@@ -2473,6 +2548,8 @@ def main() -> None:
         raise SystemExit("--max_sim_ticks must be non-negative")
     if args.experiment_max_frames < 0:
         raise SystemExit("--experiment-max-frames must be non-negative")
+    if args.experiment_setup_image_only and args.scene != "shape-replay":
+        raise SystemExit("--experiment-setup-image-only requires --scene shape-replay")
     if args.calibrate_experiment_pose:
         try:
             calibrate_shape_experiment(args)

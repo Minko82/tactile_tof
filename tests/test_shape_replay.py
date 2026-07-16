@@ -98,6 +98,12 @@ class ShapeReplayTests(unittest.TestCase):
 
     def test_prepare_replay_and_both_direction_child_commands(self):
         parser = main_module.build_arg_parser()
+        preview_args = parser.parse_args(
+            ["--scene", "shape-replay", "--experiment-direction", "descending", "--experiment-setup-image-only"]
+        )
+        self.assertTrue(preview_args.experiment_setup_image_only)
+        self.assertEqual(preview_args.experiment_setup_image_resolution, (1024, 1536))
+        self.assertEqual(preview_args.experiment_setup_camera_position, "0.52,-0.28,0.42")
         with tempfile.TemporaryDirectory() as tmpdir:
             args = parser.parse_args(
                 [

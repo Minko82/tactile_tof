@@ -86,7 +86,7 @@ Run the same capture across all built-in silicone shapes:
 
 ## Recorded Cup Experiment
 
-The cup preset is `sim/config/shape_experiments/cup.json`. It references the separated `cup.stl`, both real robot/ToF recordings, a 10 Hz 8x8 sensor profile, the timestamp lag, the calibrated TCP-to-sensor offset, and one rigid cup pose shared by both directions.
+The cup preset is `sim/config/shape_experiments/cup.json`. It references the separated `cup.stl`, both real robot/ToF recordings, a 10 Hz 8x8 replay profile matching the recorded CSV cadence, the timestamp lag, the calibrated TCP-to-sensor offset, and one rigid cup pose shared by both directions.
 
 Run the ascending replay in the Isaac Sim GUI:
 
@@ -99,6 +99,14 @@ Run both directions headlessly. `both` starts a fresh Isaac process for each dir
 ```powershell
 .\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --quiet_arrays --no_debug_draw --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\cup.json" --experiment-direction both
 ```
+
+Render only the initial descending setup for photographic comparison, without replacing any CSV outputs:
+
+```powershell
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --quiet_arrays --no_debug_draw --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\cup.json" --experiment-direction descending --experiment-setup-image-only
+```
+
+This writes `setup_beginning.png` in the direction's output directory. The comparison-camera position, target, and image resolution can be overridden with the corresponding `--experiment-setup-camera-*` and `--experiment-setup-image-resolution` options.
 
 The replay automatically captures the 205 ToF frames that overlap the robot log after applying the configured 65 ms lag. `--frames` is intentionally replaced by that reference count. The moving parent rig represents the UR tool; the cup and table never move.
 
@@ -121,6 +129,23 @@ comparison.csv     aligned per-frame validity, MAE, bias, and no-return IoU
 summary.json       aggregate and per-zone metrics, pose, and raw-RTX marker
 comparison_graph.png real/sim distance, return coverage, and error trends
 step_heatmaps.png  real versus simulated stable-plateau averages
+```
+
+Create a synchronized 1920x1080 MP4 with the real sensor and simulated 8x8
+frames playing side by side, plus a per-zone error view:
+
+```powershell
+py "C:\PathTo\tactile_tof\sim\scripts\record_shape_comparison.py" --direction descending
+```
+
+The recorder aligns frames by their exact reference timestamps and writes
+`real_vs_sim.mp4` beside `sim_flat.csv`. The default is 10 FPS, matching the
+recorded dataset. Pink error zones mean the simulation returned a distance when
+the real sensor did not; blue zones mean the opposite. To rerun Isaac before
+recording the video, use one command:
+
+```powershell
+py "C:\PathTo\tactile_tof\sim\scripts\record_shape_comparison.py" --direction descending --rerun-simulation --isaac-python "C:\isaacsim\python.bat"
 ```
 
 The checked-in cup mesh remains in source units. Isaac applies `0.001` on a parent USD transform, preserving its 72,382 triangles and 124.8843 x 102.1417 x 75 mm bounds. To add another shape, copy the cup profile and change the STL, source origin, reference CSVs, material, and calibrated rigid pose.
