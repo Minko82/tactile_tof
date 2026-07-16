@@ -31,7 +31,15 @@ from typing import Any, Iterable, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import shape_replay  # noqa: E402 - sibling module must be importable for spec-based tests
+
+
 DEFAULT_PROFILE_PATH = REPO_ROOT / "sim" / "config" / "vl53l8cx_8x8.json"
+DEFAULT_EXPERIMENT_PROFILE = REPO_ROOT / "sim" / "config" / "shape_experiments" / "cup.json"
 DEFAULT_OUTPUT_CSV = REPO_ROOT / "sim" / "output" / "vl53l8cx_isaac_tof.csv"
 DEFAULT_FLAT_CSV = REPO_ROOT / "sim" / "output" / "live_readings.csv"
 DEFAULT_TEST_RESULTS_DIR = REPO_ROOT / "sim" / "test_results"
@@ -43,6 +51,7 @@ TABLE_SENSOR_FACE_SIZE_M = (0.002, 0.034, 0.022)
 SUPPORTED_SILICONE_SHAPES = ("none", "flat", "convex", "concave", "half_dome", "cube", "fingertip")
 COMPARISON_SILICONE_SHAPES = ("flat", "convex", "concave", "half_dome", "cube", "fingertip")
 DEFAULT_SHAPE_TESTS_DIR = REPO_ROOT / "sim" / "output" / "shape_tests"
+DEFAULT_EXPERIMENT_OUTPUT_DIR = REPO_ROOT / "sim" / "output" / "shape_experiments"
 
 
 @dataclass(frozen=True)
@@ -1380,8 +1389,19 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
 
         config = VL53L8CXConfig.from_json(args.profile)
         silicone_profile = silicone_profile_from_args(args)
-        sensor_translation = np.array(_parse_vec(args.sensor_xyz, 3, "sensor_xyz"), dtype=float)
-        sensor_orientation = np.array(_parse_vec(args.sensor_quat_wxyz, 4, "sensor_quat_wxyz"), dtype=float)
+        shape_run: shape_replay.ShapeReplayRun | None = getattr(args, "shape_replay_run", None)
+        if shape_run is None:
+            sensor_translation = np.array(_parse_vec(args.sensor_xyz, 3, "sensor_xyz"), dtype=float)
+            sensor_orientation = np.array(_parse_vec(args.sensor_quat_wxyz, 4, "sensor_quat_wxyz"), dtype=float)
+            sensor_prim_path = "/VL53L8CX"
+        else:
+            first_reference = shape_run.samples[0]
+            sensor_translation = np.array(
+                (shape_run.profile.sensor_xy_m[0], shape_run.profile.sensor_xy_m[1], first_reference.sensor_z_m),
+                dtype=float,
+            )
+            sensor_orientation = np.array(shape_run.profile.sensor_quat_wxyz, dtype=float)
+            sensor_prim_path = shape_run.sensor_prim_path
 
         omni.usd.get_context().new_stage()
         stage = omni.usd.get_context().get_stage()
@@ -1407,7 +1427,7 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
             UsdGeom=UsdGeom,
             UsdShade=UsdShade,
         )
-        if args.scene != "table-cube":
+        if args.scene not in ("table-cube", "shape-replay"):
             _add_sensor_visual_marker(
                 stage=stage,
                 sensor_translation=sensor_translation,
@@ -1418,7 +1438,7 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
             )
 
         sensor = LidarRtx(
-            prim_path="/VL53L8CX",
+            prim_path=sensor_prim_path,
             translation=sensor_translation,
             orientation=sensor_orientation,
             config_file_name=None,
@@ -1477,14 +1497,26 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
                         f"{sim_tick} simulation ticks; increase --max_sim_ticks if the "
                         "scene is intentionally slow to produce RTX frames"
                     )
+                if shape_run is not None:
+                    reference = shape_run.samples[min(valid_count, len(shape_run.samples) - 1)]
+                    sensor.set_world_pose(
+                        position=np.array(
+                            (shape_run.profile.sensor_xy_m[0], shape_run.profile.sensor_xy_m[1], reference.sensor_z_m),
+                            dtype=float,
+                        ),
+                        orientation=sensor_orientation,
+                    )
                 if scene_updater is not None:
-                    scene_updater(sim_tick)
+                    if shape_run is None:
+                        scene_updater(sim_tick)
+                    else:
+                        scene_updater(sim_tick, valid_count)
                 simulation_app.update()
                 sensor_frame = sensor.get_current_frame()
                 if args.show_light_paths and ray_draw is not None and silicone_profile.is_enabled:
-                    _draw_silicone_light_paths(silicone_profile, config, ray_draw, stage, "/VL53L8CX", Gf, Usd, UsdGeom)
+                    _draw_silicone_light_paths(silicone_profile, config, ray_draw, stage, sensor_prim_path, Gf, Usd, UsdGeom)
                 elif args.debug_draw and ray_draw is not None and _has_distance_payload(sensor_frame):
-                    _draw_lidar_rays(sensor_frame, ray_draw, stage, "/VL53L8CX", Gf, Usd, UsdGeom)
+                    _draw_lidar_rays(sensor_frame, ray_draw, stage, sensor_prim_path, Gf, Usd, UsdGeom)
                 if args.print_payload_debug:
                     _print_frame_summary(sensor_frame)
                 frame = frame_from_sensor_frame(
@@ -1497,6 +1529,10 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
                     continue
 
                 frame_index = valid_count
+                if shape_run is not None:
+                    reference = shape_run.samples[frame_index]
+                    frame.timestamp = reference.reference_timestamp
+                    shape_run.sim_ticks.append(sim_tick)
                 frame = apply_silicone_optical_response(frame, config, silicone_profile)
                 frame.distances_mm = np.asarray(frame.distances_mm, dtype=np.int32)
                 if frame.intensities is not None:
@@ -1526,6 +1562,10 @@ def run_isaac_prototype(args: argparse.Namespace) -> list[VL53L8CXFrame]:
                 raise RuntimeError("no valid RTX lidar distance frames were captured")
             np.save(args.output_npy, np.stack([frame.distances_mm for frame in frames], axis=0))
 
+        if shape_run is not None:
+            summary = shape_replay.write_shape_replay_outputs(shape_run, frames)
+            print(f"[shape-replay] wrote {summary['frames']} aligned frames to: {shape_run.output_dir}")
+
         return frames
     finally:
         simulation_app.close()
@@ -1542,7 +1582,7 @@ def _create_isaac_scene(
     UsdGeom: Any,
     UsdShade: Any,
 ) -> Any | None:
-    """Create simple target scenes visible to a +X-facing solid-state lidar."""
+    """Create a prototype scene or a recorded shape-experiment replay."""
 
     materials = {
         "white": _create_material(stage, "/World/Looks/WhiteDiffuse", (0.9, 0.9, 0.86), "Default", Gf, Sdf, UsdShade),
@@ -1563,6 +1603,20 @@ def _create_isaac_scene(
         _create_silicone_shape_geometry(
             args=args,
             profile=silicone_profile,
+            stage=stage,
+            Gf=Gf,
+            Sdf=Sdf,
+            UsdGeom=UsdGeom,
+            UsdShade=UsdShade,
+        )
+
+    if args.scene == "shape-replay":
+        shape_run: shape_replay.ShapeReplayRun | None = getattr(args, "shape_replay_run", None)
+        if shape_run is None:
+            raise ValueError("shape-replay scene requires a prepared experiment profile")
+        return _create_shape_replay_scene(
+            run=shape_run,
+            materials=materials,
             stage=stage,
             Gf=Gf,
             Sdf=Sdf,
@@ -1680,6 +1734,144 @@ def _create_isaac_scene(
             UsdShade,
         )
     return None
+
+
+def _create_shape_replay_scene(
+    *,
+    run: shape_replay.ShapeReplayRun,
+    materials: dict[str, Any],
+    stage: Any,
+    Gf: Any,
+    Sdf: Any,
+    UsdGeom: Any,
+    UsdShade: Any,
+) -> Any:
+    """Build a fixed STL/table scene and a kinematic vertical sensor rig."""
+
+    profile = run.profile
+    mesh_data = shape_replay.load_stl(profile.stl_path)
+    experiment_root = UsdGeom.Xform.Define(stage, "/World/Experiment")
+    experiment_root.GetPrim().SetDocumentation(
+        f"Raw RTX replay of the recorded {profile.name} {run.direction} experiment"
+    )
+
+    table_thickness = 0.03
+    _add_box(
+        stage,
+        "/World/Experiment/Table/Mat",
+        center=(0.0, 0.0, profile.table_top_z_m - table_thickness / 2.0),
+        size=(0.80, 0.65, table_thickness),
+        material=materials["concrete"],
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+    _add_box(
+        stage,
+        "/World/Experiment/Background/RearPanel",
+        center=(0.0, 0.43, 0.30),
+        size=(0.85, 0.025, 0.60),
+        material=materials["wall"],
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+
+    cup_material = _create_material(
+        stage,
+        "/World/Looks/ShapeReplayObject",
+        profile.visual_rgb,
+        profile.nonvisual_material,
+        Gf,
+        Sdf,
+        UsdShade,
+    )
+    pose_xform = UsdGeom.Xform.Define(stage, "/World/Experiment/ShapePose")
+    pose_ops = UsdGeom.Xformable(pose_xform.GetPrim())
+    pose_ops.AddTranslateOp().Set(Gf.Vec3d(profile.mesh_pose.x_m, profile.mesh_pose.y_m, profile.table_top_z_m))
+    pose_ops.AddRotateZOp().Set(profile.mesh_pose.yaw_deg)
+
+    scale_xform = UsdGeom.Xform.Define(stage, "/World/Experiment/ShapePose/SourceUnitScale")
+    UsdGeom.Xformable(scale_xform.GetPrim()).AddScaleOp().Set(Gf.Vec3f(*(profile.stl_units_to_m,) * 3))
+    origin_xform = UsdGeom.Xform.Define(stage, "/World/Experiment/ShapePose/SourceUnitScale/SourceOrigin")
+    UsdGeom.Xformable(origin_xform.GetPrim()).AddTranslateOp().Set(
+        Gf.Vec3d(*(-value for value in profile.mesh_origin_source_units))
+    )
+    mesh = UsdGeom.Mesh.Define(stage, "/World/Experiment/ShapePose/SourceUnitScale/SourceOrigin/Mesh")
+    mesh.CreatePointsAttr([Gf.Vec3f(*vertex) for vertex in mesh_data.vertices])
+    mesh.CreateFaceVertexCountsAttr([3] * mesh_data.triangle_count)
+    mesh.CreateFaceVertexIndicesAttr(list(range(mesh_data.triangle_count * 3)))
+    mesh.CreateSubdivisionSchemeAttr(UsdGeom.Tokens.none)
+    mesh.CreateDoubleSidedAttr(True)
+    mesh.GetPrim().SetDocumentation(
+        f"Unmodified vertices from {profile.stl_path.name}; {mesh_data.triangle_count} triangles; scaling is on the parent Xform"
+    )
+    UsdShade.MaterialBindingAPI(mesh.GetPrim()).Bind(cup_material)
+
+    first_sample = run.samples[0]
+    rig = UsdGeom.Xform.Define(stage, "/World/Experiment/SensorRig")
+    rig_translate = UsdGeom.Xformable(rig.GetPrim()).AddTranslateOp()
+    rig_translate.Set(Gf.Vec3d(profile.sensor_xy_m[0], profile.sensor_xy_m[1], first_sample.tcp_z_m))
+
+    _add_cylinder(
+        stage,
+        "/World/Experiment/SensorRig/ToolFlange",
+        center=(0.0, 0.0, 0.055),
+        radius=0.042,
+        height=0.11,
+        material=materials["aluminum"],
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+    _add_box(
+        stage,
+        "/World/Experiment/SensorRig/MountPlate",
+        center=(0.0, 0.0, -0.025),
+        size=(0.075, 0.060, 0.012),
+        material=materials["aluminum"],
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+    sensor_local_z = -profile.tcp_to_sensor_z_m
+    _add_cylinder(
+        stage,
+        "/World/Experiment/SensorRig/MountStem",
+        center=(0.0, 0.0, (sensor_local_z - 0.019) / 2.0),
+        radius=0.012,
+        height=abs(sensor_local_z + 0.019),
+        material=materials["aluminum"],
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+    _add_box(
+        stage,
+        "/World/Experiment/SensorRig/SensorHousing",
+        center=(0.0, 0.0, sensor_local_z + 0.014),
+        size=(0.050, 0.044, 0.028),
+        material=materials["black"],
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+    _add_box(
+        stage,
+        "/World/Experiment/SensorRig/SensorFaceVisual",
+        center=(0.0, 0.0, sensor_local_z + 0.0015),
+        size=(0.034, 0.030, 0.002),
+        material=materials["black"],
+        Gf=Gf,
+        UsdGeom=UsdGeom,
+        UsdShade=UsdShade,
+    )
+
+    def update(_sim_tick: int, capture_index: int) -> None:
+        sample = run.samples[min(capture_index, len(run.samples) - 1)]
+        rig_translate.Set(Gf.Vec3d(profile.sensor_xy_m[0], profile.sensor_xy_m[1], sample.tcp_z_m))
+
+    return update
 
 
 def _scene_target_distance_m(args: argparse.Namespace) -> float:
@@ -2017,6 +2209,26 @@ def _add_box(
     return cube.GetPrim(), translate_op
 
 
+def _add_cylinder(
+    stage: Any,
+    path: str,
+    center: tuple[float, float, float],
+    radius: float,
+    height: float,
+    material: Any,
+    Gf: Any,
+    UsdGeom: Any,
+    UsdShade: Any,
+) -> Any:
+    cylinder = UsdGeom.Cylinder.Define(stage, path)
+    cylinder.CreateAxisAttr(UsdGeom.Tokens.z)
+    cylinder.CreateRadiusAttr(float(radius))
+    cylinder.CreateHeightAttr(float(height))
+    UsdGeom.Xformable(cylinder.GetPrim()).AddTranslateOp().Set(Gf.Vec3d(*center))
+    UsdShade.MaterialBindingAPI(cylinder.GetPrim()).Bind(material)
+    return cylinder.GetPrim()
+
+
 def _add_sensor_visual_marker(
     stage: Any,
     sensor_translation: Any,
@@ -2050,6 +2262,65 @@ def _add_sensor_visual_marker(
         UsdGeom=UsdGeom,
         UsdShade=UsdShade,
     )
+
+
+def prepare_shape_replay(args: argparse.Namespace) -> shape_replay.ShapeReplayRun:
+    profile = shape_replay.ShapeExperimentProfile.from_json(args.experiment_profile)
+    if args.experiment_direction not in ("ascending", "descending"):
+        raise ValueError("a single shape replay must use ascending or descending")
+    if args.append_csv:
+        raise ValueError("shape-replay writes a fresh benchmark directory; remove --append_csv")
+    if args.launch_visualizer:
+        raise ValueError("shape-replay writes its aligned flat CSV after capture and cannot launch the live visualizer")
+    samples = shape_replay.load_replay_samples(profile, args.experiment_direction)
+    if args.experiment_max_frames > 0:
+        samples = samples[: args.experiment_max_frames]
+    output_dir = Path(args.experiment_output_dir) / profile.name / args.experiment_direction
+    run = shape_replay.ShapeReplayRun(profile, args.experiment_direction, samples, output_dir)
+    args.shape_replay_run = run
+    args.profile = profile.sensor_profile
+    args.frames = len(samples)
+    args.output_csv = output_dir / "sim_matrix.csv"
+    args.disable_flat_csv = True
+    return run
+
+
+def calibrate_shape_experiment(args: argparse.Namespace) -> shape_replay.CalibrationResult:
+    profile = shape_replay.ShapeExperimentProfile.from_json(args.experiment_profile)
+    samples = {direction: shape_replay.load_replay_samples(profile, direction) for direction in ("ascending", "descending")}
+    sensor_config = VL53L8CXConfig.from_json(profile.sensor_profile)
+    result = shape_replay.calibrate_rigid_pose(
+        profile,
+        samples,
+        fov_h_deg=sensor_config.fov_h_deg,
+        fov_v_deg=sensor_config.fov_v_deg,
+    )
+    output_path = Path(args.experiment_output_dir) / profile.name / "calibration.json"
+    shape_replay.write_calibration(output_path, result)
+    print(json.dumps(result.as_dict(), indent=2, sort_keys=True))
+    print(f"[shape-replay] wrote calibration: {output_path}")
+    return result
+
+
+def build_shape_replay_direction_command(
+    arguments: Sequence[str],
+    direction: str,
+    *,
+    executable: str | Path | None = None,
+    script_path: str | Path | None = None,
+) -> list[str]:
+    if direction not in ("ascending", "descending"):
+        raise ValueError(f"unsupported direction {direction!r}")
+    child_arguments = shape_replay.replace_cli_option(arguments, "--experiment-direction", direction)
+    return [str(executable or sys.executable), str(script_path or Path(__file__).resolve()), *child_arguments]
+
+
+def run_both_shape_replay_directions(arguments: Sequence[str] | None = None) -> None:
+    arguments = list(sys.argv[1:] if arguments is None else arguments)
+    for direction in ("ascending", "descending"):
+        command = build_shape_replay_direction_command(arguments, direction)
+        print(f"[shape-replay] running {direction}")
+        subprocess.run(command, check=True)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -2105,9 +2376,48 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--scene",
-        choices=("cube", "table-cube", "materials", "white", "white-full", "oblique", "moving", "no-target"),
+        choices=("cube", "table-cube", "materials", "white", "white-full", "oblique", "moving", "no-target", "shape-replay"),
         default="cube",
         help="Prototype scene to render.",
+    )
+    parser.add_argument(
+        "--experiment-profile",
+        "--experiment_profile",
+        dest="experiment_profile",
+        type=Path,
+        default=DEFAULT_EXPERIMENT_PROFILE,
+        help="Shape-replay JSON profile containing STL, sensor, pose, and reference-log settings.",
+    )
+    parser.add_argument(
+        "--experiment-direction",
+        "--experiment_direction",
+        dest="experiment_direction",
+        choices=("ascending", "descending", "both"),
+        default="ascending",
+        help="Recorded direction to replay; both runs two fresh Isaac processes.",
+    )
+    parser.add_argument(
+        "--experiment-output-dir",
+        "--experiment_output_dir",
+        dest="experiment_output_dir",
+        type=Path,
+        default=DEFAULT_EXPERIMENT_OUTPUT_DIR,
+        help="Root directory for aligned shape-replay outputs.",
+    )
+    parser.add_argument(
+        "--experiment-max-frames",
+        "--experiment_max_frames",
+        dest="experiment_max_frames",
+        type=int,
+        default=0,
+        help="Optional cap for shape-replay smoke tests; 0 captures the complete overlap.",
+    )
+    parser.add_argument(
+        "--calibrate-experiment-pose",
+        "--calibrate_experiment_pose",
+        dest="calibrate_experiment_pose",
+        action="store_true",
+        help="Fit rigid STL XY/yaw, zone orientation, and mount offset without launching Isaac Sim.",
     )
     parser.add_argument(
         "--target_distance_m",
@@ -2161,6 +2471,28 @@ def main() -> None:
         raise SystemExit("--frames must be positive")
     if args.max_sim_ticks < 0:
         raise SystemExit("--max_sim_ticks must be non-negative")
+    if args.experiment_max_frames < 0:
+        raise SystemExit("--experiment-max-frames must be non-negative")
+    if args.calibrate_experiment_pose:
+        try:
+            calibrate_shape_experiment(args)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
+        return
+    if args.scene == "shape-replay":
+        if args.compare_silicone_shapes:
+            raise SystemExit("--compare_silicone_shapes cannot be combined with --scene shape-replay")
+        if args.silicone_shape not in (None, "none") or args.silicone_profile is not None:
+            raise SystemExit("silicone post-processing cannot be combined with --scene shape-replay")
+        if args.experiment_direction == "both":
+            run_both_shape_replay_directions()
+            return
+        try:
+            prepare_shape_replay(args)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(str(exc)) from exc
+        run_isaac_prototype(args)
+        return
     if args.compare_silicone_shapes:
         if args.append_csv:
             raise SystemExit("--compare_silicone_shapes writes fresh per-shape CSVs; remove --append_csv")

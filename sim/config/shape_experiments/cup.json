@@ -1,0 +1,32 @@
+{
+  "name": "cup",
+  "stl_path": "../../../data_collection/shapes/stl_files_for_simulation/cup.stl",
+  "sensor_profile": "../vl53l8cx_8x8_10hz.json",
+  "stl_units_to_m": 0.001,
+  "mesh_origin_source_units": [271.3827, 90.0780, 0.0],
+  "mesh_pose": {
+    "x_m": 0.0012494615598963913,
+    "y_m": -0.011395834617274564,
+    "yaw_deg": 90.0
+  },
+  "table_top_z_m": 0.0,
+  "tcp_to_sensor_z_m": 0.09005696180259326,
+  "timestamp_lag_ms": 65.0,
+  "sensor_xy_m": [0.0, 0.0],
+  "sensor_quat_wxyz": [0.7071067811865476, 0.0, 0.7071067811865476, 0.0],
+  "zone_transform": "identity",
+  "material": {
+    "visual_rgb": [0.008, 0.008, 0.01],
+    "nonvisual_type": "RubberStandard"
+  },
+  "directions": {
+    "ascending": {
+      "robot_csv": "../../../data_collection/shapes/cup_ascending/ur5_cup_ascending_10_iteration_0.03_inc.csv",
+      "tof_csv": "../../../data_collection/shapes/cup_ascending/vl53l5cx_cup_ascending_10_iteration_0.03.csv"
+    },
+    "descending": {
+      "robot_csv": "../../../data_collection/shapes/cup_descending/ur5_cup_descending_10_iteration_0.03_inc.csv",
+      "tof_csv": "../../../data_collection/shapes/cup_descending/vl53l5cx_cup_descending_10_iteration_0.03.csv"
+    }
+  }
+}

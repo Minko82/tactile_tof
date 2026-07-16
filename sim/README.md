@@ -4,6 +4,8 @@ This phase keeps the VL53L8CX-style 8x8 Time-of-Flight sensor backend and adds a
 
 The silicone layer is intentionally approximate: it estimates surface incidence angle, Snell-style refraction through silicone, absorption/scattering loss, and a measured ToF shift. Full optical path tracing, multipath, and Newton/FEM deformation are still separate later phases.
 
+The same entrypoint also supports recorded shape experiments. `shape-replay` loads an STL without modifying its vertices, moves a simple kinematic sensor carriage through the measured robot Z trajectory, and compares raw RTX frames with the corresponding real VL53L5CX frames.
+
 ## Current Behavior
 
 The main entrypoint is `sim/scripts/run_vl53l8cx_isaac_tof.py`.
@@ -82,6 +84,47 @@ Run the same capture across all built-in silicone shapes:
 .\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --frames 120 --scene white-full --target_distance_m 1.0 --compare_silicone_shapes --quiet_arrays --no_debug_draw
 ```
 
+## Recorded Cup Experiment
+
+The cup preset is `sim/config/shape_experiments/cup.json`. It references the separated `cup.stl`, both real robot/ToF recordings, a 10 Hz 8x8 sensor profile, the timestamp lag, the calibrated TCP-to-sensor offset, and one rigid cup pose shared by both directions.
+
+Run the ascending replay in the Isaac Sim GUI:
+
+```powershell
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\cup.json" --experiment-direction ascending
+```
+
+Run both directions headlessly. `both` starts a fresh Isaac process for each direction:
+
+```powershell
+.\python.bat "C:\PathTo\tactile_tof\sim\scripts\run_vl53l8cx_isaac_tof.py" --headless --quiet_arrays --no_debug_draw --scene shape-replay --experiment-profile "C:\PathTo\tactile_tof\sim\config\shape_experiments\cup.json" --experiment-direction both
+```
+
+The replay automatically captures the 205 ToF frames that overlap the robot log after applying the configured 65 ms lag. `--frames` is intentionally replaced by that reference count. The moving parent rig represents the UR tool; the cup and table never move.
+
+For a quick runtime check, add `--experiment-max-frames 5`; leaving it at the default `0` always runs the complete overlap.
+
+Re-run the dependency-light rigid calibration without starting Isaac Sim:
+
+```powershell
+python sim/scripts/run_vl53l8cx_isaac_tof.py --calibrate-experiment-pose --experiment-profile sim/config/shape_experiments/cup.json
+```
+
+Calibration writes `sim/output/shape_experiments/cup/calibration.json`. It searches only cup XY translation, yaw, zone-grid orientation, and the fixed TCP-to-sensor offset. It does not alter the STL or synthesize sensor dropout. Copy calibrated values into a profile only after reviewing the reported silhouette score.
+
+Each direction writes under `sim/output/shape_experiments/cup/<direction>/`:
+
+```text
+sim_matrix.csv     legacy time_stamp,data matrices using reference timestamps
+sim_flat.csv       raw zones plus reference timestamp, TCP Z, sensor Z, and RTX auxiliaries
+comparison.csv     aligned per-frame validity, MAE, bias, and no-return IoU
+summary.json       aggregate and per-zone metrics, pose, and raw-RTX marker
+comparison_graph.png real/sim distance, return coverage, and error trends
+step_heatmaps.png  real versus simulated stable-plateau averages
+```
+
+The checked-in cup mesh remains in source units. Isaac applies `0.001` on a parent USD transform, preserving its 72,382 triangles and 124.8843 x 102.1417 x 75 mm bounds. To add another shape, copy the cup profile and change the STL, source origin, reference CSVs, material, and calibrated rigid pose.
+
 Comparison mode writes one flat CSV per shape:
 
 ```text
@@ -125,6 +168,7 @@ py "C:\PathTo\tactile_tof\sim\scripts\visualizer.py" --source csv-tail --input_c
 * `moving`: white panel moving sinusoidally along the sensor axis.
 * `materials`: vertical material strips for checking intensity and material IDs.
 * `no-target`: no target object; accepted frames should be all zero.
+* `shape-replay`: fixed STL/table scene with a downward-facing sensor rig replaying recorded robot Z samples.
 
 Common options:
 

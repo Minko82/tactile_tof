@@ -1,0 +1,10 @@
+{
+  "rows": 8,
+  "cols": 8,
+  "fov_h_deg": 45.0,
+  "fov_v_deg": 45.0,
+  "min_mm": 20,
+  "max_mm": 4000,
+  "frame_rate_hz": 10.0,
+  "invalid_mm": 0
+}
