@@ -1,44 +1,41 @@
-import subprocess
-import time
+"""Compile + upload the vl53l5cx_stream sketch to the ESP32-C6 with arduino-cli.
+
+    python3 flash.py [port]        port defaults to auto-detect (/dev/cu.usbmodem*)
+
+Needs:  brew install arduino-cli
+        arduino-cli core install esp32:esp32
+The SparkFun VL53L5CX library is picked up from ~/Documents/Arduino/libraries.
+No arduino-cli?  Open firmware/vl53l5cx_stream/vl53l5cx_stream.ino in the
+Arduino IDE, select the ESP32C6 board + port, and press Upload.
+"""
+import glob
 import os
+import subprocess
+import sys
 
-# Configuration
-arduino_cli_path = "arduino-cli"
+BOARD = "esp32:esp32:esp32c6:CDCOnBoot=cdc"   # CDC on boot: Serial -> native USB port
+HERE = os.path.dirname(os.path.abspath(__file__))
+SKETCH = os.path.join(HERE, "vl53l5cx_stream")
 
-# Get absolute path to the current directory
-base_dir = os.path.dirname(os.path.abspath(__file__))
 
-# Point to the SKETCH folder
-sketch_dir = os.path.join(base_dir, "firmware", "basic_sensor")
-# Point to the SparkFun VL53L5CX library folder
-sparkfun_lib_path = os.path.join(base_dir, "SparkFun_VL53L5CX_Arduino_Library")
+def find_port():
+    cands = sorted(glob.glob("/dev/cu.usbmodem*"))
+    if not cands:
+        raise SystemExit("No /dev/cu.usbmodem* port found — plug in the ESP32-C6 "
+                         "(and close the Serial Monitor), or pass the port explicitly.")
+    return cands[0]
 
-arduino_port = "/dev/cu.usbmodem1101" 
-arduino_board = "esp32:esp32:esp32c6"
 
-# Commands
-compile_cmd = [
-    arduino_cli_path, 
-    "compile", 
-    "--fqbn", arduino_board, 
-    "--libraries", sparkfun_lib_path,
-    sketch_dir
-]
+def main():
+    port = sys.argv[1] if len(sys.argv) > 1 else find_port()
+    print(f"Compiling {SKETCH} ...")
+    subprocess.run(["arduino-cli", "compile", "--fqbn", BOARD, SKETCH], check=True)
+    print(f"Uploading to {port} ...")
+    subprocess.run(["arduino-cli", "upload", "-p", port, "--fqbn", BOARD, SKETCH],
+                   check=True)
+    print("Done. Sanity-check the stream with:\n"
+          "  python3 ../data_collection/A3_proximity/tof_logger.py")
 
-upload_cmd = [
-    arduino_cli_path, 
-    "upload", 
-    "-p", arduino_port, 
-    "--fqbn", arduino_board, 
-    sketch_dir
-]
 
-print(f"Compiling with custom library from {sparkfun_lib_path}...")
-subprocess.run(compile_cmd, check=True)
-
-print(f"Uploading to {arduino_board}...")
-subprocess.run(upload_cmd, check=True)
-
-print("Upload complete. Launching Python Viz...")
-time.sleep(3) 
-subprocess.run(["python3", os.path.join(base_dir, "vis", "tof_matrix_viz.py")], check=True)
+if __name__ == "__main__":
+    main()

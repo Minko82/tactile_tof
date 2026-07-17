@@ -183,9 +183,13 @@ def main():
         print(f"wrote {out}  ({state.n} frames)" + (f"  reader error: {state.err}" if state.err else ""))
         return
 
-    ani = FuncAnimation(fig, update, interval=50, blit=False, cache_frame_data=False)
+    # plt.pause() polling loop, NOT FuncAnimation: the macosx backend dies with a
+    # native SIGTRAP under FuncAnimation (py3.14 / mpl3.11).
     try:
-        plt.show()
+        plt.show(block=False)
+        while plt.fignum_exists(fig.number):
+            update(0)
+            plt.pause(0.05)
     finally:
         stop.set()
 

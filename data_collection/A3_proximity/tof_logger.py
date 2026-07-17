@@ -1,11 +1,20 @@
 """
 8x8 ToF sensor reader (VL53L5CX on an ESP32-C6, over USB serial).
 
-Firmware: firmware/vl53l5cx_esp32c6/ streams one line per frame:
-    D,8,<d0>,<d1>,...,<d63>     distances in mm, -1 = no valid target
+Firmware: firmware/vl53l5cx_stream/ streams per frame (older firmware sends
+only the D line — both are supported):
+    A,8,<a0>,...,<a63>          ambient_per_spad, kcps/SPAD (always valid)
+    S,8,<s0>,...,<s63>          signal_per_spad, kcps/SPAD (0 = invalid)
+    Q,8,<q0>,...,<q63>          range_sigma_mm (0 = invalid)
+    D,8,<d0>,...,<d63>          distances in mm, -1 = no valid target
     lines starting with '#' are human-readable status messages
 
-robot.py's `record` command uses open_sensor() + read_frame() from here.
+read_frame(dev)      -> [d0..d63]                       (legacy, D line only)
+read_frame_full(dev) -> ([d..], [s..]|None, [q..]|None, [a..]|None)
+A/S/Q arrive BEFORE their D line, so read_frame_full returns the instant the D
+line lands — no added latency; with older firmware the extras are simply None.
+
+robot.py's commands use open_sensor() + read_frame*() from here.
 Run standalone to sanity-check the sensor:  python3 tof_logger.py
 """
 import time
@@ -47,22 +56,45 @@ def open_sensor():
     return dev
 
 
-def read_frame(dev):
-    """Parse one 'D,8,d0..d63' line -> list of 64 distances (mm, -1 = no target).
-    Returns None for status ('#...') lines or malformed/partial lines."""
-    raw = dev.readline().decode(errors="ignore").strip()
+def _parse_line(raw):
+    """-> (tag, [64 ints]) for a well-formed S/Q/D line, else (None, None)."""
     if not raw or raw.startswith("#"):
-        return None
+        return None, None
     parts = raw.split(",")
-    if len(parts) < 3 or parts[0] != "D":
-        return None
+    if len(parts) < 3 or parts[0] not in ("D", "S", "Q", "A"):
+        return None, None
     try:
         vals = [int(x) for x in parts[2:]]
     except ValueError:
-        return None
+        return None, None
     if len(vals) != N_ZONES:
+        return None, None
+    return parts[0], vals
+
+
+def read_frame(dev):
+    """Parse one 'D,8,d0..d63' line -> list of 64 distances (mm, -1 = no target).
+    Returns None for status/S/Q/malformed lines (callers loop until a frame)."""
+    tag, vals = _parse_line(dev.readline().decode(errors="ignore").strip())
+    return vals if tag == "D" else None
+
+
+def read_frame_full(dev):
+    """One serial line -> completed frame or None (call in a loop, like read_frame).
+
+    Buffers A/S/Q lines on the device; when the D line (sent last by the
+    firmware) arrives, returns (dist, sig, sigma, ambient) where the extras are
+    the buffered lists or None if the running firmware never sent them."""
+    pend = getattr(dev, "_tof_pend", None)
+    if pend is None:
+        pend = dev._tof_pend = {}
+    tag, vals = _parse_line(dev.readline().decode(errors="ignore").strip())
+    if tag in ("A", "S", "Q"):
+        pend[tag] = vals
         return None
-    return vals
+    if tag == "D":
+        return vals, pend.pop("S", None), pend.pop("Q", None), pend.pop("A", None)
+    return None
 
 
 if __name__ == "__main__":
