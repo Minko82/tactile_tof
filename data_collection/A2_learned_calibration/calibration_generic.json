@@ -1,36 +1,41 @@
 {
   "type": "generic",
   "weights": [
-    10.807072095725605,
-    0.8451386265310373,
-    0.00031434427665634143,
-    -2.5451405919077885e-07,
-    -3.9263203232177686,
-    0.005852884230653155,
-    0.19122773412347022
+    25.899526175578156,
+    0.7571793147125426,
+    0.0003875086927401264,
+    -2.50701043102556e-07,
+    -6.324561915560812,
+    0.009545449926791197,
+    0.2154416316563989,
+    597.3167954684869,
+    -0.3834570367620414,
+    -97.48365916070637
   ],
-  "raw_min": 6.0,
-  "raw_max": 644.5,
+  "raw_min": 15.7,
+  "raw_max": 662.5,
   "ls_min": 3.2188758248682006,
   "ls_max": 12.3275577091062,
-  "ls_default": 8.401670093861112,
+  "ls_default": 8.383547447757369,
+  "g_max": 0.17126913059972704,
   "meta": {
-    "n": 12022,
+    "n": 21242,
     "pools": [
-      "white",
-      "wood",
+      "black_cardboard",
       "black_shiny",
+      "blue",
+      "cardboard",
       "matte_black",
       "metal_sheet",
-      "black_cardboard",
-      "cardboard",
-      "blue",
       "red_bubblewrap",
-      "white_foamwrapper",
+      "texture_towel",
+      "white",
       "white_fabric",
-      "texture_towel"
+      "white_foamwrapper",
+      "wood"
     ],
-    "rmse_mm": 5.4365539842536865,
-    "loso_note": "expect ~4-5 mm RMSE typical on unseen materials"
+    "rmse_mm": 5.514978970940381,
+    "epoch_offset_mm": 9.7,
+    "features": "raw, log(signal), tilt(8x8 plane fit)"
   }
 }

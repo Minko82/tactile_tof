@@ -28,14 +28,14 @@ from live_filter import LiveFilter
 from run_test import PROCESS_ACCEL_PSD, MANEUVER_ACCEL_PSD, REJECT_SIGMA
 
 
-def main():
-    a = sys.argv[1:]
-    nums = [int(x) for x in a if x.isdigit()]
-    words = [x for x in a if not x.isdigit() and x not in ("viz", "print")]
-    surf = words[0] if words else robot.DEFAULT_SURFACE   # any material name works
-
+def run(surface=None, seed=None, viz=False, show_script=False,
+        out_pool=None, tilt_deg=0.0):
+    """One comparison round; importable by the collect/ scripts.
+    out_pool overrides the destination pool (default: the surface name)."""
+    surf = surface or robot.DEFAULT_SURFACE
+    pool = out_pool or surf
     cal = load_for_surface(surf)          # calibration_<surf>.json (or warns)
-    print(f"surface '{surf}'  ->  runs pool {surf}/<n>/")
+    print(f"surface '{surf}'  ->  runs pool {pool}/<n>/")
     print(f"kalman : offset {robot.SURFACE_OFFSETS_MM.get(surf, robot.MOUNT_OFFSET_MM)} mm "
           f"+ LiveFilter(q={robot.FT_ACCEL_PSD:.0f}, adaptive R)")
     print(f"learned: poly calibration (fit RMSE {cal.meta.get('rmse_mm', float('nan')):.2f} mm) "
@@ -57,14 +57,24 @@ def main():
                             reject_sigma=REJECT_SIGMA)),
     ]
     robot.cmd_filtertest(
-        seed=nums[0] if nums else None,
-        show_script="print" in a,
-        viz="viz" in a,
+        seed=seed,
+        show_script=show_script,
+        viz=viz,
         pipelines=pipelines,
-        # every material pools its runs under A2/<surface>/<n>/
-        out_base=os.path.join(HERE, surf),
+        # every material pools its runs under A2/<pool>/<n>/
+        out_base=os.path.join(HERE, pool),
         surface=surf,
+        tilt_deg=tilt_deg,
     )
+
+
+def main():
+    a = sys.argv[1:]
+    nums = [int(x) for x in a if x.isdigit()]
+    words = [x for x in a if not x.isdigit() and x not in ("viz", "print")]
+    run(surface=words[0] if words else None,
+        seed=nums[0] if nums else None,
+        viz="viz" in a, show_script="print" in a)
 
 
 if __name__ == "__main__":
