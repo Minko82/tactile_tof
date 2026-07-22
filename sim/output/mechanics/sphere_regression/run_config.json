@@ -121,6 +121,15 @@
       "enabled": false
     }
   },
+  "video": {
+    "codec": "libx264",
+    "enabled": true,
+    "fps": 30.0,
+    "include_ui": false,
+    "path": "D:\\Machines virtueles\\tactile_tof\\sim\\output\\mechanics\\sphere_regression\\experiment.mp4",
+    "post_recovery_s": 1.0,
+    "quality": 8
+  },
   "viewer": {
     "camera": {
       "pitch_degrees": -20.0,

@@ -1,4 +1,4 @@
-"""Deterministic approach/press/hold/release/recovery trajectories."""
+"""Prescribed, repeatable approach/press/hold/release/recovery trajectories."""
 
 from __future__ import annotations
 
@@ -27,8 +27,8 @@ def _ramp(alpha: float, easing: str) -> tuple[float, float]:
     raise ValueError(f"Unsupported trajectory easing {easing!r}")
 
 
-class DeterministicTrajectory:
-    """Piecewise deterministic trajectory with explicit phase durations."""
+class PrescribedTrajectory:
+    """Piecewise prescribed trajectory with explicit phase durations."""
 
     def __init__(self, config: dict[str, Any]):
         self.clearance_m = float(config["clearance_m"])
@@ -125,3 +125,7 @@ class DeterministicTrajectory:
 
     def nominal_indentation_m(self, sample: TrajectorySample) -> float:
         return max(0.0, sample.normal_travel_m - self.clearance_m)
+
+
+# Backward-compatible import name for output-schema v2.
+DeterministicTrajectory = PrescribedTrajectory

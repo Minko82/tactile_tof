@@ -10,13 +10,14 @@ from .config import ConfigError, load_run_config
 from .contact import ContactSummary, estimate_contact_summary
 from .mapping import SurfaceMapping, build_surface_mapping, reconstruct_surface
 from .mesh import AssetValidationError, SurfaceReport, TetReport
-from .trajectory import DeterministicTrajectory, TrajectorySample
+from .trajectory import DeterministicTrajectory, PrescribedTrajectory, TrajectorySample
 
 __all__ = [
     "AssetValidationError",
     "ConfigError",
     "ContactSummary",
     "DeterministicTrajectory",
+    "PrescribedTrajectory",
     "SurfaceMapping",
     "SurfaceReport",
     "TetReport",

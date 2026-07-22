@@ -35,7 +35,16 @@
       "direction": [1.0, 0.0, 0.0]
     }
   },
+  "equilibration": {
+    "minimum_duration_s": 0.5,
+    "maximum_duration_s": 3.0,
+    "velocity_tolerance_m_s": 0.00001,
+    "stable_frames": 10,
+    "timeout_behavior": "warn"
+  },
   "solver": {
+    "deterministic": true,
+    "newton_strict": false,
     "simulation_fps": 60,
     "substeps": 20,
     "vbd_iterations": 15,
@@ -68,7 +77,17 @@
   },
   "output": {
     "directory": "../../../output/mechanics/sphere_regression",
+    "chunk_size_frames": 300,
     "rate_hz": 60.0
+  },
+  "video": {
+    "enabled": false,
+    "path": "../../../output/mechanics/sphere_regression/experiment.mp4",
+    "fps": 30.0,
+    "codec": "libx264",
+    "quality": 8,
+    "include_ui": false,
+    "post_recovery_s": 1.0
   },
   "viewer": {
     "camera": {

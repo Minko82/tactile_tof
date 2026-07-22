@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "experiment_id": "custom_fingertip_sphere_touch",
-  "asset_config": "../assets/custom_fingertip.example.json",
+  "experiment_id": "sphere_visible_motion_demo",
+  "asset_config": "../assets/legacy_fingertip.json",
   "material_config": "../materials/ecoflex_00_30.json",
   "fingertip_transform": {
     "position_m": [0.0, 0.0, 0.0],
     "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
-    "scale": 1.0
+    "scale": 0.01
   },
   "contact": {
-    "location_m": [0.0, 0.0, 0.0125],
+    "location_m": [-0.00889358, -0.00108855, 0.019684070719499],
     "direction": [0.0, 0.0, -1.0]
   },
   "indenter": {
@@ -19,19 +19,19 @@
   },
   "trajectory": {
     "clearance_m": 0.0005,
-    "indentation_m": 0.00075,
+    "indentation_m": 0.0009,
     "easing": "linear",
     "durations_s": {
-      "approach": 0.25,
-      "press": 0.375,
+      "approach": 0.1,
+      "press": 0.18,
       "hold": 1.0,
-      "release": 0.625,
+      "release": 0.28,
       "recovery": 1.0
     },
     "lateral_slip": {
       "enabled": false,
       "duration_s": 0.5,
-      "distance_m": 0.001,
+      "distance_m": 0.0,
       "direction": [1.0, 0.0, 0.0]
     }
   },
@@ -70,19 +70,19 @@
     "nominal_wall_thickness_m": 0.003,
     "engineering_strain_limit": 0.3,
     "minimum_rest_tet_volume_m3": 1e-18,
-    "minimum_rest_tet_quality": 0.03,
+    "minimum_rest_tet_quality": 0.01,
     "maximum_rest_tet_condition_number": 100.0,
     "minimum_relative_tet_volume": 0.15,
     "tet_check_interval_substeps": 5
   },
   "output": {
-    "directory": "../../../output/mechanics/custom_fingertip_sphere",
+    "directory": "../../../output/mechanics/sphere_visible_demo",
     "chunk_size_frames": 300,
     "rate_hz": 60.0
   },
   "video": {
     "enabled": false,
-    "path": "../../../output/mechanics/custom_fingertip_sphere/experiment.mp4",
+    "path": "../../../output/mechanics/sphere_visible_demo/experiment.mp4",
     "fps": 30.0,
     "codec": "libx264",
     "quality": 8,
@@ -91,9 +91,9 @@
   },
   "viewer": {
     "camera": {
-      "position_m": [0.09, 0.09, 0.06],
+      "position_m": [0.05, 0.05, 0.035],
       "yaw_degrees": -135.0,
-      "pitch_degrees": -20.0
+      "pitch_degrees": -12.0
     },
     "render_contacts": false
   }

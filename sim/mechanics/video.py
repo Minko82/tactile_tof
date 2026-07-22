@@ -45,8 +45,8 @@ class VideoRecorder:
             import imageio_ffmpeg  # noqa: F401 -- verifies the MP4 backend is installed.
         except ImportError as exc:
             raise RuntimeError(
-                "MP4 recording requires imageio-ffmpeg. Run through uv with "
-                "'--with imageio-ffmpeg', or install sim/mechanics-requirements.txt."
+                "MP4 recording requires imageio and imageio-ffmpeg. Run through uv with "
+                "'--with imageio --with imageio-ffmpeg', or install the mechanics requirements."
             ) from exc
         return imageio.get_writer(path, format="FFMPEG", mode="I", **options)
 
@@ -60,7 +60,9 @@ class VideoRecorder:
         rendered = viewer.get_frame(render_ui=self.include_ui)
         frame = np.asarray(rendered.numpy(), dtype=np.uint8)
         if frame.ndim != 3 or frame.shape[2] != 3:
-            raise RuntimeError(f"viewer returned an invalid RGB frame shape: {frame.shape}")
+            raise RuntimeError(
+                f"viewer returned an invalid RGB frame shape: {frame.shape}"
+            )
         if self._writer is None:
             self._writer = self._writer_factory(
                 self.path,
@@ -82,4 +84,3 @@ class VideoRecorder:
         if self._writer is not None:
             self._writer.close()
         self.closed = True
-

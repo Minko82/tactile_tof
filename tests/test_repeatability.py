@@ -4,8 +4,8 @@ from pathlib import Path
 
 import numpy as np
 
-from sim.mechanics.exporter import MechanicalDataExporter
-from sim.mechanics.trajectory import DeterministicTrajectory
+from sim.mechanics.exporter import MechanicalDataExporter, load_frame_chunks
+from sim.mechanics.trajectory import PrescribedTrajectory
 
 
 CONFIG = {
@@ -30,8 +30,8 @@ CONFIG = {
 
 class RepeatabilityTests(unittest.TestCase):
     def test_identical_trajectory_configs_are_equivalent(self):
-        first = DeterministicTrajectory(CONFIG)
-        second = DeterministicTrajectory(CONFIG)
+        first = PrescribedTrajectory(CONFIG)
+        second = PrescribedTrajectory(CONFIG)
         times = np.linspace(0.0, first.total_duration_s, 1001)
         a = np.asarray(
             [
@@ -57,7 +57,9 @@ class RepeatabilityTests(unittest.TestCase):
 
     def test_exported_arrays_round_trip_without_randomness(self):
         with tempfile.TemporaryDirectory() as temporary:
-            exporter = MechanicalDataExporter(Path(temporary), {"seedless": True})
+            exporter = MechanicalDataExporter(
+                Path(temporary), {"output": {"chunk_size_frames": 1}}
+            )
             exporter.append(
                 {
                     "timestamp_s": 0.0,
@@ -69,11 +71,13 @@ class RepeatabilityTests(unittest.TestCase):
                 {"timestamp_s": 0.0, "trajectory_phase": "approach"},
             )
             exporter.finalize()
-            with np.load(Path(temporary) / "frames.npz") as loaded:
-                np.testing.assert_array_equal(
-                    loaded["tet_particle_positions_m"],
-                    np.arange(12, dtype=float).reshape(1, 4, 3),
-                )
+            loaded = load_frame_chunks(temporary)
+            np.testing.assert_array_equal(
+                loaded["tet_particle_positions_m"],
+                np.arange(12, dtype=float).reshape(1, 4, 3),
+            )
+            self.assertTrue((Path(temporary) / "frames_00000.npz").is_file())
+            self.assertTrue((Path(temporary) / "frames_manifest.json").is_file())
 
 
 if __name__ == "__main__":

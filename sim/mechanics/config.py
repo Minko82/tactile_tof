@@ -1,11 +1,33 @@
-"""Strict JSON loading for the mechanics runner."""
+"""Strict JSON loading and defaults for the mechanics runner."""
 
 from __future__ import annotations
 
 import copy
 import json
+import math
 from pathlib import Path
 from typing import Any
+
+from .schema import MECHANICS_OUTPUT_SCHEMA_VERSION
+
+
+VIDEO_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "path": "mechanics.mp4",
+    "fps": 30,
+    "codec": "libx264",
+    "quality": 7,
+    "include_ui": False,
+    "post_recovery_s": 0.0,
+}
+
+EQUILIBRATION_DEFAULTS: dict[str, Any] = {
+    "minimum_duration_s": 0.5,
+    "maximum_duration_s": 3.0,
+    "velocity_tolerance_m_s": 1.0e-5,
+    "stable_frames": 10,
+    "timeout_behavior": "warn",
+}
 
 
 class ConfigError(ValueError):
@@ -35,6 +57,35 @@ def _require(mapping: dict[str, Any], keys: tuple[str, ...], context: str) -> No
         raise ConfigError(f"{context} is missing required fields: {', '.join(missing)}")
 
 
+def _finite_scalar(value: Any, context: str) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{context} must be numeric") from exc
+    if not math.isfinite(result):
+        raise ConfigError(f"{context} must be finite")
+    return result
+
+
+def _finite_vector(
+    value: Any, length: int, context: str, *, nonzero: bool = False
+) -> list[float]:
+    if not isinstance(value, (list, tuple)) or len(value) != length:
+        raise ConfigError(f"{context} must contain exactly {length} values")
+    result = [_finite_scalar(item, context) for item in value]
+    if nonzero and math.sqrt(sum(item * item for item in result)) <= 0.0:
+        raise ConfigError(f"{context} must be nonzero")
+    return result
+
+
+def _positive(value: Any, context: str, *, allow_zero: bool = False) -> float:
+    result = _finite_scalar(value, context)
+    if result < 0.0 or (result == 0.0 and not allow_zero):
+        qualifier = "nonnegative" if allow_zero else "positive"
+        raise ConfigError(f"{context} must be {qualifier}")
+    return result
+
+
 def load_run_config(path: str | Path) -> dict[str, Any]:
     experiment_path = Path(path).resolve()
     experiment = _read_json(experiment_path)
@@ -52,7 +103,6 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
             "contact_parameters",
             "monitoring",
             "output",
-            "video",
         ),
         "experiment config",
     )
@@ -82,7 +132,23 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
     asset = copy.deepcopy(asset)
     for key in ("surface_stl", "volume_msh", "regions_npz", "surface_mapping_npz"):
         asset[key] = _resolve_path(asset_path.parent, asset[key])
+
     resolved = copy.deepcopy(experiment)
+    resolved["video"] = {**VIDEO_DEFAULTS, **copy.deepcopy(experiment.get("video", {}))}
+    resolved["equilibration"] = {
+        **EQUILIBRATION_DEFAULTS,
+        **copy.deepcopy(experiment.get("equilibration", {})),
+    }
+    resolved["solver"] = {
+        "deterministic": False,
+        "newton_strict": False,
+        **copy.deepcopy(experiment["solver"]),
+    }
+    resolved["output"] = {
+        "chunk_size_frames": 300,
+        **copy.deepcopy(experiment["output"]),
+    }
+    resolved["mechanics_output_schema_version"] = MECHANICS_OUTPUT_SCHEMA_VERSION
     resolved["asset_config"] = str(asset_path)
     resolved["material_config"] = str(material_path)
     resolved["asset"] = asset
@@ -94,9 +160,10 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
     resolved["output"]["directory"] = _resolve_path(
         experiment_path.parent, resolved["output"]["directory"]
     )
-    resolved["video"]["path"] = _resolve_path(
-        experiment_path.parent, resolved["video"]["path"]
-    )
+    if bool(resolved["video"]["enabled"]):
+        resolved["video"]["path"] = _resolve_path(
+            experiment_path.parent, resolved["video"]["path"]
+        )
     resolved["_experiment_config_path"] = str(experiment_path)
     validate_run_config(resolved)
     return resolved
@@ -107,33 +174,52 @@ def validate_run_config(config: dict[str, Any]) -> None:
     _require(
         transform, ("position_m", "quaternion_xyzw", "scale"), "fingertip_transform"
     )
-    if len(transform["position_m"]) != 3 or len(transform["quaternion_xyzw"]) != 4:
-        raise ConfigError(
-            "fingertip transform requires a 3-vector position and xyzw quaternion"
-        )
-    scale = float(transform["scale"])
-    if scale <= 0.0:
-        raise ConfigError("fingertip transform scale must be positive")
+    _finite_vector(transform["position_m"], 3, "fingertip position_m")
+    _finite_vector(
+        transform["quaternion_xyzw"], 4, "fingertip quaternion_xyzw", nonzero=True
+    )
+    _positive(transform["scale"], "fingertip transform scale")
 
     material = config["material"]
-    youngs = float(material["youngs_modulus_pa"])
-    poisson = float(material["poisson_ratio"])
-    density = float(material["density_kg_m3"])
+    youngs = _positive(material["youngs_modulus_pa"], "material Young's modulus")
+    poisson = _finite_scalar(material["poisson_ratio"], "material Poisson ratio")
+    density = _positive(material["density_kg_m3"], "material density")
     if youngs <= 0.0 or density <= 0.0 or not (-1.0 < poisson < 0.5):
         raise ConfigError(
             "material E/density must be positive and Poisson ratio must be in (-1, 0.5)"
         )
+    if not isinstance(material["damping"], dict) or "value" not in material["damping"]:
+        raise ConfigError("material damping must contain a value")
+    _positive(material["damping"]["value"], "material damping", allow_zero=True)
 
     contact = config["contact"]
     _require(contact, ("location_m", "direction"), "contact")
-    if len(contact["location_m"]) != 3 or len(contact["direction"]) != 3:
-        raise ConfigError("contact location and direction must be 3-vectors")
+    _finite_vector(contact["location_m"], 3, "contact location_m")
+    _finite_vector(contact["direction"], 3, "contact direction", nonzero=True)
+
     indenter = config["indenter"]
     supported = {"sphere", "flat_plate", "cylinder", "rigid_stl"}
-    if indenter.get("type") not in supported:
+    kind = indenter.get("type")
+    if kind not in supported:
         raise ConfigError(f"indenter type must be one of {sorted(supported)}")
-    if len(indenter.get("quaternion_xyzw", [])) != 4:
-        raise ConfigError("indenter quaternion_xyzw is required")
+    _finite_vector(
+        indenter.get("quaternion_xyzw"), 4, "indenter quaternion_xyzw", nonzero=True
+    )
+    if kind == "sphere":
+        _positive(indenter.get("radius_m"), "sphere radius_m")
+    elif kind == "flat_plate":
+        for field in ("width_m", "depth_m", "thickness_m"):
+            _positive(indenter.get(field), f"flat plate {field}")
+    elif kind == "cylinder":
+        _positive(indenter.get("radius_m"), "cylinder radius_m")
+        _positive(indenter.get("height_m"), "cylinder height_m")
+    else:
+        if not str(indenter.get("stl", "")).strip():
+            raise ConfigError("rigid STL indenter requires stl")
+        _positive(indenter.get("scale_to_m"), "rigid STL scale_to_m")
+        _finite_vector(
+            indenter.get("contact_point_local_m"), 3, "rigid STL contact_point_local_m"
+        )
 
     trajectory = config["trajectory"]
     _require(
@@ -141,12 +227,43 @@ def validate_run_config(config: dict[str, Any]) -> None:
         ("clearance_m", "indentation_m", "easing", "durations_s"),
         "trajectory",
     )
-    wall = float(config["monitoring"]["nominal_wall_thickness_m"])
-    strain_limit = float(config["monitoring"]["engineering_strain_limit"])
-    if float(trajectory["indentation_m"]) > wall * strain_limit:
+    _positive(trajectory["clearance_m"], "trajectory clearance_m", allow_zero=True)
+    indentation = _positive(trajectory["indentation_m"], "trajectory indentation_m")
+    if trajectory["easing"] not in {"linear", "smoothstep"}:
+        raise ConfigError("trajectory easing must be 'linear' or 'smoothstep'")
+    durations = trajectory["durations_s"]
+    _require(
+        durations, ("approach", "press", "hold", "release", "recovery"), "durations_s"
+    )
+    for phase in ("approach", "press", "release"):
+        _positive(durations[phase], f"trajectory {phase} duration")
+    for phase in ("hold", "recovery"):
+        _positive(durations[phase], f"trajectory {phase} duration", allow_zero=True)
+    slip = trajectory.get("lateral_slip", {})
+    if bool(slip.get("enabled", False)):
+        _positive(slip.get("duration_s"), "lateral slip duration_s")
+        _positive(slip.get("distance_m"), "lateral slip distance_m", allow_zero=True)
+        _finite_vector(slip.get("direction"), 3, "lateral slip direction", nonzero=True)
+
+    monitoring = config["monitoring"]
+    wall = _positive(monitoring["nominal_wall_thickness_m"], "nominal wall thickness")
+    strain_limit = _positive(
+        monitoring["engineering_strain_limit"], "engineering strain limit"
+    )
+    if indentation > wall * strain_limit + 1.0e-15:
         raise ConfigError(
             "trajectory indentation exceeds nominal_wall_thickness_m * engineering_strain_limit"
         )
+    for field in (
+        "minimum_rest_tet_volume_m3",
+        "minimum_rest_tet_quality",
+        "maximum_rest_tet_condition_number",
+        "minimum_relative_tet_volume",
+    ):
+        _positive(monitoring[field], f"monitoring {field}")
+    if int(monitoring["tet_check_interval_substeps"]) <= 0:
+        raise ConfigError("tet_check_interval_substeps must be positive")
+
     solver = config["solver"]
     _require(
         solver,
@@ -156,16 +273,46 @@ def validate_run_config(config: dict[str, Any]) -> None:
             "vbd_iterations",
             "gravity_m_s2",
             "particle_radius_edge_fraction",
+            "deterministic",
         ),
         "solver",
     )
     if int(solver["simulation_fps"]) <= 0 or int(solver["substeps"]) <= 0:
         raise ConfigError("simulation_fps and substeps must be positive")
-    output_hz = float(config["output"]["rate_hz"])
-    if output_hz <= 0.0 or output_hz > float(solver["simulation_fps"]):
+    if int(solver["vbd_iterations"]) <= 0:
+        raise ConfigError("vbd_iterations must be positive")
+    _finite_scalar(solver["gravity_m_s2"], "solver gravity_m_s2")
+    _positive(
+        solver["particle_radius_edge_fraction"], "solver particle_radius_edge_fraction"
+    )
+
+    equilibration = config["equilibration"]
+    minimum = _positive(
+        equilibration["minimum_duration_s"],
+        "equilibration minimum_duration_s",
+        allow_zero=True,
+    )
+    maximum = _positive(
+        equilibration["maximum_duration_s"], "equilibration maximum_duration_s"
+    )
+    if maximum < minimum:
         raise ConfigError(
-            "output rate_hz must be positive and no greater than simulation_fps"
+            "equilibration maximum_duration_s must be >= minimum_duration_s"
         )
+    _positive(
+        equilibration["velocity_tolerance_m_s"], "equilibration velocity_tolerance_m_s"
+    )
+    if int(equilibration["stable_frames"]) <= 0:
+        raise ConfigError("equilibration stable_frames must be positive")
+    if equilibration["timeout_behavior"] not in {"warn", "fail"}:
+        raise ConfigError("equilibration timeout_behavior must be 'warn' or 'fail'")
+
+    output = config["output"]
+    output_hz = _positive(output["rate_hz"], "output rate_hz")
+    if output_hz > float(solver["simulation_fps"]):
+        raise ConfigError("output rate_hz cannot exceed simulation_fps")
+    if int(output["chunk_size_frames"]) <= 0:
+        raise ConfigError("output chunk_size_frames must be positive")
 
     video = config["video"]
     _require(
@@ -173,16 +320,21 @@ def validate_run_config(config: dict[str, Any]) -> None:
         ("enabled", "path", "fps", "codec", "quality", "include_ui", "post_recovery_s"),
         "video",
     )
-    video_fps = float(video["fps"])
-    if video_fps <= 0.0 or video_fps > float(solver["simulation_fps"]):
-        raise ConfigError(
-            "video fps must be positive and no greater than simulation_fps"
-        )
+    if not str(video["path"]).strip():
+        raise ConfigError("video path cannot be empty")
+    video_fps = _positive(video["fps"], "video fps")
+    if video_fps > float(solver["simulation_fps"]):
+        raise ConfigError("video fps cannot exceed simulation_fps")
     quality = int(video["quality"])
     if quality < 0 or quality > 10:
         raise ConfigError("video quality must be between 0 and 10")
-    if float(video["post_recovery_s"]) < 0.0:
-        raise ConfigError("video post_recovery_s cannot be negative")
+    _positive(video["post_recovery_s"], "video post_recovery_s", allow_zero=True)
+
+    camera = config.get("viewer", {}).get("camera")
+    if camera is not None:
+        _finite_vector(camera.get("position_m"), 3, "viewer camera position_m")
+        _finite_scalar(camera.get("pitch_degrees"), "viewer camera pitch_degrees")
+        _finite_scalar(camera.get("yaw_degrees"), "viewer camera yaw_degrees")
 
 
 def material_lame_parameters(material: dict[str, Any]) -> tuple[float, float]:

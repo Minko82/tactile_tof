@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -7,6 +8,7 @@ from sim.mechanics.mesh import (
     boundary_faces,
     validate_surface,
     validate_tets,
+    weld_stl_vertices,
 )
 
 
@@ -35,6 +37,24 @@ class AssetValidationTests(unittest.TestCase):
     def test_open_surface_is_rejected(self):
         with self.assertRaisesRegex(AssetValidationError, "open boundary edges"):
             validate_surface(self.vertices, self.faces[:-1])
+
+    def test_invalid_two_body_mold_fixture_is_rejected(self):
+        try:
+            import trimesh
+        except ImportError:
+            self.skipTest("trimesh is an optional asset-preparation dependency")
+
+        fixture = Path(__file__).parent / "fixtures/invalid_two_body_mold.stl"
+        loaded = trimesh.load_mesh(fixture, process=False)
+        vertices, faces = weld_stl_vertices(
+            np.asarray(loaded.vertices),
+            np.asarray(loaded.faces),
+            decimal_digits=7,
+        )
+        with self.assertRaisesRegex(
+            AssetValidationError, "204 duplicate faces; 715 non-manifold edges"
+        ):
+            validate_surface(vertices * 1.0e-3, faces)
 
     def test_inverted_tet_is_rejected(self):
         inverted = self.tets[:, [1, 0, 2, 3]]

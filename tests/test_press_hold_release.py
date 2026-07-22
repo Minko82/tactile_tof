@@ -2,11 +2,11 @@ import unittest
 
 import numpy as np
 
-from sim.mechanics.trajectory import DeterministicTrajectory
+from sim.mechanics.trajectory import PrescribedTrajectory
 
 
 def trajectory():
-    return DeterministicTrajectory(
+    return PrescribedTrajectory(
         {
             "clearance_m": 0.0005,
             "indentation_m": 0.00075,

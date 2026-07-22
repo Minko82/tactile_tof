@@ -4,3 +4,7 @@ newton/
 .venv/
 __pycache__/
 *.pyc
+imgui.ini
+sim/output/**
+sim/assets/**/prepared/**
+*.npz

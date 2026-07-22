@@ -6,3 +6,5 @@ trimesh>=4.6.8
 meshio>=5.3
 numpy>=1.26
 scipy>=1.11
+imageio>=2.37
+imageio-ffmpeg>=0.6

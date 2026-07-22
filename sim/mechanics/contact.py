@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .indenter import quaternion_rotate_xyzw
+
 
 @dataclass(frozen=True)
 class ContactSummary:
@@ -13,17 +15,21 @@ class ContactSummary:
     active_contact_indices: np.ndarray
     active_particle_indices: np.ndarray
     particle_forces_n: np.ndarray
-    normal_force_n: float
-    tangential_force_n: np.ndarray
-    slip_velocity_m_s: np.ndarray
+    estimated_axial_reaction_n: float
+    estimated_transverse_reaction_n: np.ndarray
+    estimated_tangential_relative_velocity_m_s: np.ndarray
 
+    @property
+    def normal_force_n(self) -> float:
+        return self.estimated_axial_reaction_n
 
-def quaternion_rotate_xyzw(quaternion: np.ndarray, vectors: np.ndarray) -> np.ndarray:
-    q = np.asarray(quaternion, dtype=np.float64)
-    v = np.asarray(vectors, dtype=np.float64)
-    xyz = q[:3]
-    w = q[3]
-    return v + 2.0 * np.cross(xyz, np.cross(xyz, v) + w * v)
+    @property
+    def tangential_force_n(self) -> np.ndarray:
+        return self.estimated_transverse_reaction_n
+
+    @property
+    def slip_velocity_m_s(self) -> np.ndarray:
+        return self.estimated_tangential_relative_velocity_m_s
 
 
 def estimate_contact_summary(
@@ -46,10 +52,15 @@ def estimate_contact_summary(
     force_threshold_n: float,
     friction_epsilon_m_s: float,
 ) -> ContactSummary:
-    """Reproduce Newton VBD's particle/rigid penalty force on the host.
+    """Estimate Newton VBD's particle/rigid penalty reaction on the host.
 
     Contact candidates inside the collision margin are not considered contact
     unless the computed reaction exceeds ``force_threshold_n``.
+
+    This estimator depends on internal Newton soft-contact and VBD arrays. It
+    must be revalidated whenever the pinned Newton revision changes. The
+    tangential value is an instantaneous relative-velocity estimate, not a
+    validated stick-slip state model.
     """
 
     particles = np.asarray(contact_particles, dtype=np.int64)
@@ -59,9 +70,9 @@ def estimate_contact_summary(
             active_contact_indices=np.empty(0, dtype=np.int32),
             active_particle_indices=np.empty(0, dtype=np.int32),
             particle_forces_n=np.zeros((0, 3), dtype=np.float64),
-            normal_force_n=0.0,
-            tangential_force_n=np.zeros(3, dtype=np.float64),
-            slip_velocity_m_s=np.zeros(3, dtype=np.float64),
+            estimated_axial_reaction_n=0.0,
+            estimated_transverse_reaction_n=np.zeros(3, dtype=np.float64),
+            estimated_tangential_relative_velocity_m_s=np.zeros(3, dtype=np.float64),
         )
     positions = np.asarray(particle_positions_m, dtype=np.float64)[particles]
     previous = np.asarray(previous_particle_positions_m, dtype=np.float64)[particles]
@@ -107,9 +118,9 @@ def estimate_contact_summary(
             active_contact_indices=active,
             active_particle_indices=np.empty(0, dtype=np.int32),
             particle_forces_n=np.zeros((0, 3), dtype=np.float64),
-            normal_force_n=0.0,
-            tangential_force_n=np.zeros(3, dtype=np.float64),
-            slip_velocity_m_s=np.zeros(3, dtype=np.float64),
+            estimated_axial_reaction_n=0.0,
+            estimated_transverse_reaction_n=np.zeros(3, dtype=np.float64),
+            estimated_tangential_relative_velocity_m_s=np.zeros(3, dtype=np.float64),
         )
     direction = np.asarray(loading_direction, dtype=np.float64)
     direction /= np.linalg.norm(direction)
@@ -123,9 +134,9 @@ def estimate_contact_summary(
         active_contact_indices=active,
         active_particle_indices=np.unique(particles[active]).astype(np.int32),
         particle_forces_n=forces[active],
-        normal_force_n=axial,
-        tangential_force_n=tangential,
-        slip_velocity_m_s=slip,
+        estimated_axial_reaction_n=axial,
+        estimated_transverse_reaction_n=tangential,
+        estimated_tangential_relative_velocity_m_s=slip,
     )
 
 

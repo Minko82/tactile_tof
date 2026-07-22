@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "asset_id": "custom_fingertip_positive_body_example",
+  "asset_semantics": "positive_hollow_silicone_body_required",
+  "mesh_units": "m",
+  "surface_stl": "../../../assets/new_fingertip_custom/prepared/surface.stl",
+  "volume_msh": "../../../assets/new_fingertip_custom/prepared/volume.msh",
+  "regions_npz": "../../../assets/new_fingertip_custom/prepared/regions.npz",
+  "surface_mapping_npz": "../../../assets/new_fingertip_custom/prepared/surface_mapping.npz",
+  "notes": "Example paths only. Regenerate the prepared asset and regions from the positive cured silicone body before running."
+}

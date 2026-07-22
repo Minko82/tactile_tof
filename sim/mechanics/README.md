@@ -1,87 +1,142 @@
-# Custom fingertip mechanics
+# Newton fingertip mechanics
 
-This workflow is independent of the ToF simulator. It validates a positive
-silicone body, creates a tetrahedral mesh, maps the original coating surface
-into that mesh, runs a deterministic Newton VBD touch, and exports mechanical
-ground truth.
+This workflow is independent of the ToF simulator. It validates and prepares a
+positive hollow silicone body, maps its high-resolution surface to a tetrahedral
+mesh, settles the mounted body under gravity, then runs a prescribed repeatable
+normal-indentation trajectory with Newton VBD.
 
-## Prepare an asset
+The current capability is a **normal indentation mechanics MVP**. Shear is not
+validated, slip is not validated, and nonzero-friction/lateral-slip experiments
+are provisional. Contact area, reaction, and tangential relative velocity are
+estimates reconstructed from Newton's VBD penalty-contact arrays—not exact force
+ground truth or a complete stick–slip model.
 
-Install the small preparation extras in the Python environment that runs
-Newton (`sim/mechanics-requirements.txt`), then run:
+## Prepare a new fingertip
+
+The input STL must be the positive cured silicone body, not the negative mold.
+Copy the example regions file, update its dimensions and selectors for the new
+geometry, then run:
 
 ```powershell
 python sim/scripts/prepare_fingertip.py `
-  --stl "sim/assets/new_fingertip_custom/custom.stl" `
+  --stl "D:\path\to\positive_fingertip.stl" `
   --units mm `
   --target-edge-mm 1.0 `
-  --output-dir "sim/assets/new_fingertip_custom/prepared" `
-  --regions-config "sim/config/mechanics/regions/custom_fingertip_regions.json"
+  --output-dir "sim/assets/my_fingertip/prepared" `
+  --regions-config "sim/config/mechanics/regions/my_fingertip_regions.json"
 ```
 
-The command creates `surface.stl`, `volume.msh`, `asset.json`, `regions.npz`,
-and `surface_mapping.npz`. It refuses to overwrite them unless `--force` is
-given.
+Preparation creates `surface.stl`, `volume.msh`, `asset.json`, `regions.npz`,
+and `surface_mapping.npz`. Add an asset JSON under
+`sim/config/mechanics/assets/` and point an experiment's `asset_config` at it;
+no Python edit is needed.
+
+The former custom STL is retained only as
+`tests/fixtures/invalid_two_body_mold.stl`. It has duplicate faces and
+non-manifold edges and is deliberately rejected by asset preparation. The
+renamed `custom_fingertip_regions.example.json` is illustrative only; regenerate
+its dimensions and regions when the positive body is available.
 
 Region selectors can be iterated without remeshing:
 
 ```powershell
 python sim/scripts/select_fingertip_regions.py `
-  --surface-stl "sim/assets/new_fingertip_custom/prepared/surface.stl" `
-  --volume-msh "sim/assets/new_fingertip_custom/prepared/volume.msh" `
-  --regions-config "sim/config/mechanics/regions/custom_fingertip_regions.json" `
-  --output "sim/assets/new_fingertip_custom/prepared/regions.npz" --force
+  --surface-stl "sim/assets/my_fingertip/prepared/surface.stl" `
+  --volume-msh "sim/assets/my_fingertip/prepared/volume.msh" `
+  --regions-config "sim/config/mechanics/regions/my_fingertip_regions.json" `
+  --output "sim/assets/my_fingertip/prepared/regions.npz" --force
 ```
-
-The supplied `custom.stl` currently fails before meshing: after normal STL
-vertex welding it contains 204 duplicate faces and 715 non-manifold edges.
-Re-export a watertight, manifold union of the **positive hollow silicone
-body**. Do not export the negative manufacturing mold. The region JSON then
-needs to identify the actual mount, inner coating, and touchable outer faces;
-those choices are data, so no Python edit is needed.
 
 ## Run mechanics
 
-The preserved sphere regression is the default:
+The preserved sphere experiment is the default regression:
 
 ```powershell
-python sim/scripts/run_touch_mechanics.py --viewer null --headless
+uv --native-tls run --project sim/newton --extra examples `
+  python sim/scripts/run_touch_mechanics.py --viewer null --headless
 ```
 
-After preparing the custom asset:
+Run a prepared custom asset by changing only the experiment JSON:
 
 ```powershell
-python sim/scripts/run_touch_mechanics.py `
+uv --native-tls run --project sim/newton --extra examples `
+  python sim/scripts/run_touch_mechanics.py `
   --config "sim/config/mechanics/experiments/custom_fingertip_sphere.json" `
   --viewer null --headless
 ```
 
-An experiment JSON references separate asset and material JSON files. It also
-contains the fingertip transform, explicit world-space contact location and
-direction, indenter, approach/press/hold/release/recovery timing, optional
-lateral slip, solver/contact settings, volume limits, and output rate.
+The lifecycle is `initialization`, `settling`, `capture_baseline`, `approach`,
+`press`, `hold`, `release`, and `recovery`. Settling ignores fixed mount
+particles when checking velocity convergence. Touch displacement is measured
+from the equilibrated baseline; CAD-rest displacement is exported separately.
+
 Supported indenters are `sphere`, `flat_plate`, `cylinder`, and `rigid_stl`.
-Rigid STL indenters additionally require `stl`, `scale_to_m`, and
-`contact_point_local_m`.
+Plate and cylinder support distances account for their configured orientation.
 
-Each run writes:
+## Record an MP4
 
-- `run_config.json`: fully resolved configuration, including unchanged
-  material values;
-- `frames.npz`: object motion, tet particles, full/inner/outer deformed
-  surfaces, contact mask/area/forces/slip, displacement, tet volumes, and
-  phase;
-- `metrics.csv`: scalar time series;
-- `surface_mapping.npz`: the immutable rest-state barycentric mapping;
-- `failure_state.npz`: written only when the configured tet-volume circuit
-  breaker trips.
+The `video` section is optional and disabled by default. To record through
+recovery and an optional post-recovery tail:
 
-`contact_flag` is based on positive Newton penalty reaction above the configured
-force threshold. Collision-margin candidates alone do not count as contact.
+```powershell
+uv --native-tls run --project sim/newton --extra examples `
+  --with imageio --with imageio-ffmpeg `
+  python sim/scripts/run_touch_mechanics.py `
+  --config "sim/config/mechanics/experiments/sphere_visible_demo.json" `
+  --viewer gl --headless --record-video
+```
+
+Recording requires the GL viewer. Omit `--headless` for a visible window, and
+use `--video-path` to override the filename. `video.post_recovery_s` controls
+the recovered-pose tail.
+
+## Newton compatibility and repeatability
+
+The supported runtime is Newton `1.2.0.dev0` at Git SHA
+`8baee876dc5f001c66f1cbafec16246a3fb6f6f6`. Every run records the active SHA
+and warns if it differs; pass `--strict-newton-version` or set
+`solver.newton_strict` to fail instead. `contact.py` depends on internal Newton
+contact arrays and must be revalidated after a Newton update.
+
+`solver.deterministic` requests deterministic execution options when the active
+Newton API exposes them. The pinned API does not currently expose such options
+for VBD/collision construction, so only the prescribed trajectory is
+deterministic. Repeatability is checked numerically, not claimed bitwise.
+
+## Output schema 2
+
+Every output directory is self-contained:
+
+- `run_config.json`, `asset_manifest.json`, `regions.npz`,
+  `surface_mapping.npz`, and `newton_environment.json` describe the run;
+- `frames_00000.npz`, `frames_00001.npz`, and so on contain bounded chunks;
+- `frames_manifest.json` lists and versions the chunks;
+- `metrics.csv` is streamed incrementally;
+- `failure_state.npz` is written for a controlled volume/equilibration failure.
+
+Canonical contact fields are `approx_contact_area_m2`,
+`estimated_axial_reaction_n`, `estimated_transverse_reaction_n`, and
+`estimated_tangential_relative_velocity_m_s`. Schema version 2 retains the old
+field names as deprecated aliases for one transition version. Object velocity
+is split into `object_linear_velocity_m_s` and
+`object_angular_velocity_rad_s`.
 
 ## Tests
 
+Run the mechanics unit tests (including the invalid-STL fixture):
+
 ```powershell
-python -m pytest -q tests/test_asset_validation.py tests/test_surface_mapping.py `
-  tests/test_press_hold_release.py tests/test_contact_detection.py tests/test_repeatability.py
+uv --native-tls run --project sim/newton --with pytest --with trimesh `
+  python -m pytest -o addopts= -q `
+  tests/test_asset_validation.py tests/test_example_configs.py `
+  tests/test_indenter_orientation.py tests/test_surface_mapping.py `
+  tests/test_press_hold_release.py tests/test_contact_detection.py `
+  tests/test_repeatability.py tests/test_video_recording.py
+```
+
+Run the real Newton rollout and numerical repeatability tests explicitly:
+
+```powershell
+uv --native-tls run --project sim/newton --extra examples --with pytest `
+  python -m pytest -o addopts= -m newton_integration tests/integration -q
 ```

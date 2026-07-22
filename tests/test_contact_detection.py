@@ -33,9 +33,9 @@ class ContactDetectionTests(unittest.TestCase):
         active = summary(-0.0001)
         margin_only = summary(-0.002)
         self.assertTrue(active.contact_flag)
-        self.assertGreater(active.normal_force_n, 0.0)
+        self.assertGreater(active.estimated_axial_reaction_n, 0.0)
         self.assertFalse(margin_only.contact_flag)
-        self.assertEqual(margin_only.normal_force_n, 0.0)
+        self.assertEqual(margin_only.estimated_axial_reaction_n, 0.0)
 
     def test_contact_face_mask_tracks_active_particle(self):
         vertices = np.asarray(
