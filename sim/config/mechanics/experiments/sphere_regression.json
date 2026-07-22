@@ -21,6 +21,7 @@
     "clearance_m": 0.0005,
     "indentation_m": 0.00075,
     "easing": "linear",
+    "post_recovery_s": 1.0,
     "durations_s": {
       "approach": 0.25,
       "press": 0.375,
@@ -86,8 +87,7 @@
     "fps": 30.0,
     "codec": "libx264",
     "quality": 8,
-    "include_ui": false,
-    "post_recovery_s": 1.0
+    "include_ui": false
   },
   "viewer": {
     "camera": {

@@ -106,11 +106,7 @@ class TouchMechanicsControllerV2:
         self.sim_substeps = int(solver_cfg["substeps"])
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.iterations = int(solver_cfg["vbd_iterations"])
-        self.post_recovery_s = (
-            float(self.config["video"]["post_recovery_s"])
-            if self.video_enabled
-            else 0.0
-        )
+        self.post_recovery_s = float(self.config["trajectory"]["post_recovery_s"])
         self.touch_runtime_s = self.trajectory.total_duration_s + self.post_recovery_s
         self.sim_time = 0.0
         self.trajectory_time_s = 0.0
@@ -231,14 +227,22 @@ class TouchMechanicsControllerV2:
             float(solver_cfg["particle_radius_edge_fraction"])
             * rest_report.median_boundary_edge_m
         )
+        requested_clearance_m = float(self.config["trajectory"]["clearance_m"])
         settling_gap_m = max(
-            float(self.config["trajectory"]["clearance_m"]),
+            requested_clearance_m,
             float(self.config["contact_parameters"]["margin_m"])
             + 2.0 * self.particle_radius,
         )
-        self.indenter_settling_position = (
+        self.config["trajectory"]["requested_clearance_m"] = requested_clearance_m
+        self.config["trajectory"]["clearance_m"] = settling_gap_m
+        self.trajectory = PrescribedTrajectory(self.config["trajectory"])
+        self.touch_runtime_s = self.trajectory.total_duration_s + self.post_recovery_s
+        self.indenter_start_position = (
             contact_translation - self.loading_direction * settling_gap_m
         )
+        self.indenter_settling_position = self.indenter_start_position.copy()
+        self.current_sample = self.trajectory.sample(0.0)
+        self.current_body_position = self.indenter_start_position.copy()
 
         material = self.config["material"]
         mu, lam = material_lame_parameters(material)
@@ -330,6 +334,22 @@ class TouchMechanicsControllerV2:
             ),
             **solver_deterministic_kwargs,
         )
+        self.contact_buffer_capacity = int(
+            solver_cfg["rigid_body_particle_contact_buffer_size"]
+        )
+        self.contact_buffer_counts = getattr(
+            self.solver, "body_particle_contact_counts", None
+        )
+        if self.contact_buffer_counts is None:
+            raise RuntimeError(
+                "Pinned SolverVBD exposes no body_particle_contact_counts; "
+                "contact-buffer saturation cannot be monitored safely"
+            )
+        self.current_contact_buffer_count = 0
+        self.maximum_contact_buffer_count = 0
+        self.contact_buffer_saturated = False
+        self.first_contact_buffer_saturation_frame = -1
+        self.first_contact_buffer_saturation_substep = -1
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -364,6 +384,16 @@ class TouchMechanicsControllerV2:
             "simulation_capability": SIMULATION_CAPABILITY,
             "shear_validated": SHEAR_VALIDATED,
             "slip_validated": SLIP_VALIDATED,
+            "configured_contact_capacity": self.contact_buffer_capacity,
+            "maximum_contact_count_observed": self.maximum_contact_buffer_count,
+            "contact_buffer_saturation_flag": self.contact_buffer_saturated,
+            "first_contact_buffer_saturation_frame": None,
+            "first_contact_buffer_saturation_substep": None,
+            "contact_buffer_monitor_source": (
+                "SolverVBD.body_particle_contact_counts[indenter_body]"
+            ),
+            "requested_clearance_m": requested_clearance_m,
+            "effective_clearance_m": settling_gap_m,
         }
         self.config["output_metadata"] = {
             key: self.environment[key]
@@ -459,6 +489,7 @@ class TouchMechanicsControllerV2:
             )
 
     def _write_environment(self) -> None:
+        self._refresh_contact_buffer_environment()
         _write_json(self.environment_path, self.environment)
 
     def _add_indenter_shape(self, builder, body: int, shape_cfg) -> None:
@@ -526,6 +557,62 @@ class TouchMechanicsControllerV2:
         self.current_body_position = position
         self.current_body_velocity = velocity
 
+    def _refresh_contact_buffer_environment(self) -> None:
+        if not hasattr(self, "environment"):
+            return
+        self.environment.update(
+            {
+                "configured_contact_capacity": self.contact_buffer_capacity,
+                "maximum_contact_count_observed": self.maximum_contact_buffer_count,
+                "contact_buffer_saturation_flag": self.contact_buffer_saturated,
+                "first_contact_buffer_saturation_frame": (
+                    None
+                    if self.first_contact_buffer_saturation_frame < 0
+                    else self.first_contact_buffer_saturation_frame
+                ),
+                "first_contact_buffer_saturation_substep": (
+                    None
+                    if self.first_contact_buffer_saturation_substep < 0
+                    else self.first_contact_buffer_saturation_substep
+                ),
+            }
+        )
+
+    def _monitor_contact_buffer(self) -> None:
+        observed = int(self.contact_buffer_counts.numpy()[self.indenter_body])
+        self.current_contact_buffer_count = observed
+        self.maximum_contact_buffer_count = max(
+            self.maximum_contact_buffer_count, observed
+        )
+        if observed < self.contact_buffer_capacity:
+            return
+
+        self.contact_buffer_saturated = True
+        if self.first_contact_buffer_saturation_substep < 0:
+            self.first_contact_buffer_saturation_frame = self.exporter.frame_count
+            self.first_contact_buffer_saturation_substep = self.substep
+        self._refresh_contact_buffer_environment()
+        self._write_environment()
+        export_failure_state(
+            self.failure_path,
+            particle_q=self._particle_positions(),
+            sim_time_s=np.float64(self.substep * self.sim_dt),
+            trajectory_phase=np.asarray(self._phase_name()),
+            failure_reason=np.asarray("contact_buffer_saturation"),
+            configured_contact_capacity=np.int32(self.contact_buffer_capacity),
+            observed_contact_count=np.int32(observed),
+            first_saturation_frame=np.int64(self.first_contact_buffer_saturation_frame),
+            first_saturation_substep=np.int64(
+                self.first_contact_buffer_saturation_substep
+            ),
+        )
+        self.exporter.finalize()
+        raise RuntimeError(
+            "Rigid-body particle-contact buffer saturated: "
+            f"observed {observed}, capacity {self.contact_buffer_capacity}; "
+            "increase rigid_body_particle_contact_buffer_size"
+        )
+
     def simulate(self, *, advance_trajectory: bool) -> None:
         for _ in range(self.sim_substeps):
             self.state_0.clear_forces()
@@ -542,6 +629,7 @@ class TouchMechanicsControllerV2:
             )
             self.substep += 1
             self.state_0, self.state_1 = self.state_1, self.state_0
+            self._monitor_contact_buffer()
             interval = int(self.config["monitoring"]["tet_check_interval_substeps"])
             if self.substep % interval == 0:
                 self._check_tet_state()
@@ -726,6 +814,22 @@ class TouchMechanicsControllerV2:
             "displacement_from_cad_rest_m": displacement_cad,
             "displacement_from_equilibrated_baseline_m": displacement_baseline,
             "contact_flag": bool(contact.contact_flag),
+            "contact_buffer_configured_capacity": np.int32(
+                self.contact_buffer_capacity
+            ),
+            "contact_buffer_observed_count": np.int32(
+                self.current_contact_buffer_count
+            ),
+            "contact_buffer_maximum_count_observed": np.int32(
+                self.maximum_contact_buffer_count
+            ),
+            "contact_buffer_saturation_flag": bool(self.contact_buffer_saturated),
+            "contact_buffer_first_saturation_frame": np.int64(
+                self.first_contact_buffer_saturation_frame
+            ),
+            "contact_buffer_first_saturation_substep": np.int64(
+                self.first_contact_buffer_saturation_substep
+            ),
             "contact_face_mask": face_mask,
             "approx_contact_area_m2": np.float64(approx_area),
             "estimated_axial_reaction_n": np.float64(axial),
@@ -748,6 +852,18 @@ class TouchMechanicsControllerV2:
         metric = {
             "timestamp_s": time_s,
             "trajectory_time_s": self.trajectory_time_s,
+            "contact_buffer_configured_capacity": self.contact_buffer_capacity,
+            "contact_buffer_observed_count": self.current_contact_buffer_count,
+            "contact_buffer_maximum_count_observed": (
+                self.maximum_contact_buffer_count
+            ),
+            "contact_buffer_saturation_flag": int(self.contact_buffer_saturated),
+            "contact_buffer_first_saturation_frame": (
+                self.first_contact_buffer_saturation_frame
+            ),
+            "contact_buffer_first_saturation_substep": (
+                self.first_contact_buffer_saturation_substep
+            ),
             "trajectory_phase": phase,
             "contact_flag": int(contact.contact_flag),
             "approx_contact_area_m2": approx_area,

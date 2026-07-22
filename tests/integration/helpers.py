@@ -41,6 +41,7 @@ def abbreviated_config(tmp_path: Path, name: str) -> Path:
         "release": 0.10,
         "recovery": 0.15,
     }
+    config["trajectory"]["post_recovery_s"] = 0.0
     config["equilibration"] = {
         "minimum_duration_s": 0.50,
         "maximum_duration_s": 2.00,
@@ -67,9 +68,9 @@ def abbreviated_config(tmp_path: Path, name: str) -> Path:
     return path
 
 
-def run_rollout(
+def run_rollout_process(
     config_path: Path, output_dir: Path
-) -> tuple[dict[str, np.ndarray], list[dict[str, str]]]:
+) -> subprocess.CompletedProcess[str]:
     require_newton_runtime()
     command = [
         sys.executable,
@@ -83,7 +84,7 @@ def run_rollout(
         str(output_dir),
         "--strict-newton-version",
     ]
-    completed = subprocess.run(
+    return subprocess.run(
         command,
         cwd=REPO_ROOT,
         check=False,
@@ -91,6 +92,12 @@ def run_rollout(
         text=True,
         timeout=180,
     )
+
+
+def run_rollout(
+    config_path: Path, output_dir: Path
+) -> tuple[dict[str, np.ndarray], list[dict[str, str]]]:
+    completed = run_rollout_process(config_path, output_dir)
     if completed.returncode:
         pytest.fail(
             "Newton rollout failed\n"

@@ -66,9 +66,11 @@ uv --native-tls run --project sim/newton --extra examples `
 ```
 
 The lifecycle is `initialization`, `settling`, `capture_baseline`, `approach`,
-`press`, `hold`, `release`, and `recovery`. Settling ignores fixed mount
-particles when checking velocity convergence. Touch displacement is measured
-from the equilibrated baseline; CAD-rest displacement is exported separately.
+`press`, `hold`, `release`, `recovery`, and optional `post_recovery`. Settling
+ignores fixed mount particles when checking velocity convergence. Its safe gap
+is also the trajectory start gap, so the first approach substep is continuous.
+Touch displacement is measured from the equilibrated baseline; CAD-rest
+displacement is exported separately.
 
 Supported indenters are `sphere`, `flat_plate`, `cylinder`, and `rigid_stl`.
 Plate and cylinder support distances account for their configured orientation.
@@ -87,8 +89,9 @@ uv --native-tls run --project sim/newton --extra examples `
 ```
 
 Recording requires the GL viewer. Omit `--headless` for a visible window, and
-use `--video-path` to override the filename. `video.post_recovery_s` controls
-the recovered-pose tail.
+use `--video-path` to override the filename. `trajectory.post_recovery_s`
+controls the recovered-pose tail and is always simulated whether video is on
+or off, so recording cannot change the mechanics experiment.
 
 ## Newton compatibility and repeatability
 
@@ -112,13 +115,19 @@ Every output directory is self-contained:
 - `frames_00000.npz`, `frames_00001.npz`, and so on contain bounded chunks;
 - `frames_manifest.json` lists and versions the chunks;
 - `metrics.csv` is streamed incrementally;
-- `failure_state.npz` is written for a controlled volume/equilibration failure.
+- `failure_state.npz` is written for a controlled volume, equilibration, or
+  contact-buffer failure.
 
 Canonical contact fields are `approx_contact_area_m2`,
 `estimated_axial_reaction_n`, `estimated_transverse_reaction_n`, and
 `estimated_tangential_relative_velocity_m_s`. Schema version 2 retains the old
-field names as deprecated aliases for one transition version. Object velocity
-is split into `object_linear_velocity_m_s` and
+field names as deprecated aliases for one transition version.
+
+The configured, current, and maximum VBD rigid-particle contact counts are
+exported with saturation status and first-saturation indices. A count at or
+above `rigid_body_particle_contact_buffer_size` stops the run instead of
+silently accepting dropped contacts.
+Object velocity is split into `object_linear_velocity_m_s` and
 `object_angular_velocity_rad_s`.
 
 ## Tests
@@ -134,7 +143,9 @@ uv --native-tls run --project sim/newton --with pytest --with trimesh `
   tests/test_repeatability.py tests/test_video_recording.py
 ```
 
-Run the real Newton rollout and numerical repeatability tests explicitly:
+The `newton_integration` tests are intentionally excluded from plain `pytest`
+by `pytest.ini`; run the real rollout, saturation, and numerical repeatability
+tests explicitly on the target Newton/Warp/GPU environment:
 
 ```powershell
 uv --native-tls run --project sim/newton --extra examples --with pytest `

@@ -58,9 +58,8 @@ def main() -> None:
     maximum_duration_s = (
         float(config["equilibration"]["maximum_duration_s"])
         + trajectory.total_duration_s
+        + float(config["trajectory"]["post_recovery_s"])
     )
-    if video_enabled:
-        maximum_duration_s += float(config["video"]["post_recovery_s"])
     simulation_fps = float(config["solver"]["simulation_fps"])
     parser.set_defaults(
         num_frames=int(math.ceil(maximum_duration_s * simulation_fps)) + 2

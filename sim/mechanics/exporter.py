@@ -39,6 +39,12 @@ METRIC_COLUMNS = (
     "inverted_tet_count",
     "max_free_particle_speed_m_s",
     "equilibration_stable_frames",
+    "contact_buffer_configured_capacity",
+    "contact_buffer_observed_count",
+    "contact_buffer_maximum_count_observed",
+    "contact_buffer_saturation_flag",
+    "contact_buffer_first_saturation_frame",
+    "contact_buffer_first_saturation_substep",
     # Deprecated schema-v2 aliases.
     "contact_area_m2",
     "normal_force_n",
