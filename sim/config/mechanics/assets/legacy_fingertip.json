@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "asset_id": "legacy_fingertip_sphere_regression",
+  "asset_semantics": "legacy_regression_proxy",
+  "mesh_units": "cm",
+  "surface_stl": "../../../assets/fingertip/fingertip_tet__tracked_surface.stl",
+  "volume_msh": "../../../assets/fingertip/fingertip_tet_.msh",
+  "regions_npz": "../../../assets/fingertip/mechanics_regions.npz",
+  "surface_mapping_npz": "../../../assets/fingertip/mechanics_surface_mapping.npz",
+  "notes": "Compatibility asset for the original sphere experiment. Prepare new hollow fingertips with prepare_fingertip.py instead."
+}

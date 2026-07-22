@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "asset_id": "new_fingertip_custom",
+  "asset_semantics": "positive_hollow_silicone_body",
+  "expected_dimensions_mm": [72.0, 72.0, 28.0],
+  "dimension_tolerance_mm": 0.1,
+  "minimum_wall_thickness_mm": 0.5,
+  "maximum_wall_thickness_mm": 30.0,
+  "minimum_face_area_mm2": 1e-08,
+  "weld_decimal_digits": 7,
+  "require_single_surface_component": true,
+  "classification_angle_degrees": 40.0,
+  "optimize_tets": true,
+  "mount_vertices": {
+    "all": [
+      {
+        "type": "coordinate_band",
+        "axis": "z",
+        "center_mm": 0.0,
+        "half_width_mm": 0.3
+      },
+      {
+        "type": "radial_range",
+        "axis": "z",
+        "min_radius_mm": 30.0,
+        "max_radius_mm": 37.0
+      }
+    ]
+  },
+  "inner_coating_faces": {
+    "type": "halfspace",
+    "origin_m": [0.0, 0.0, -0.0005],
+    "normal": [0.0, 0.0, 1.0],
+    "side": "negative"
+  },
+  "outer_contact_faces": {
+    "type": "halfspace",
+    "origin_m": [0.0, 0.0, 0.0005],
+    "normal": [0.0, 0.0, 1.0],
+    "side": "positive"
+  },
+  "tet_validation": {
+    "minimum_volume_m3": 1e-18,
+    "minimum_mean_ratio_quality": 0.03,
+    "maximum_condition_number": 100.0
+  },
+  "surface_mapping": {
+    "barycentric_tolerance": 1e-05,
+    "nearest_vertex_tolerance_mm": 1e-05,
+    "candidate_tet_count": 96,
+    "allow_projection": false,
+    "projection_tolerance_mm": 0.0001
+  }
+}

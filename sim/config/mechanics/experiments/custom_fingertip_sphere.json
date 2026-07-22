@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "experiment_id": "custom_fingertip_sphere_touch",
+  "asset_config": "../../../assets/new_fingertip_custom/prepared/asset.json",
+  "material_config": "../materials/ecoflex_00_30.json",
+  "fingertip_transform": {
+    "position_m": [0.0, 0.0, 0.0],
+    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+    "scale": 1.0
+  },
+  "contact": {
+    "location_m": [0.0, 0.0, 0.0125],
+    "direction": [0.0, 0.0, -1.0]
+  },
+  "indenter": {
+    "type": "sphere",
+    "radius_m": 0.009,
+    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+  },
+  "trajectory": {
+    "clearance_m": 0.0005,
+    "indentation_m": 0.00075,
+    "easing": "linear",
+    "durations_s": {
+      "approach": 0.25,
+      "press": 0.375,
+      "hold": 1.0,
+      "release": 0.625,
+      "recovery": 1.0
+    },
+    "lateral_slip": {
+      "enabled": false,
+      "duration_s": 0.5,
+      "distance_m": 0.001,
+      "direction": [1.0, 0.0, 0.0]
+    }
+  },
+  "solver": {
+    "simulation_fps": 60,
+    "substeps": 20,
+    "vbd_iterations": 15,
+    "gravity_m_s2": -9.81,
+    "particle_radius_edge_fraction": 0.35,
+    "particle_enable_self_contact": false,
+    "particle_enable_tile_solve": true,
+    "particle_collision_detection_interval": -1,
+    "rigid_body_particle_contact_buffer_size": 256
+  },
+  "contact_parameters": {
+    "normal_stiffness": 10000.0,
+    "normal_damping": 0.0001,
+    "damping_semantics": "stiffness_relative_dimensionless",
+    "static_friction": 0.0,
+    "dynamic_friction": 0.0,
+    "margin_m": 0.0005,
+    "force_threshold_n": 1e-06,
+    "friction_epsilon_m_s": 1e-05,
+    "face_mask_radius_multiplier": 2.0
+  },
+  "monitoring": {
+    "nominal_wall_thickness_m": 0.003,
+    "engineering_strain_limit": 0.3,
+    "minimum_rest_tet_volume_m3": 1e-18,
+    "minimum_rest_tet_quality": 0.03,
+    "maximum_rest_tet_condition_number": 100.0,
+    "minimum_relative_tet_volume": 0.15,
+    "tet_check_interval_substeps": 5
+  },
+  "output": {
+    "directory": "../../../output/mechanics/custom_fingertip_sphere",
+    "rate_hz": 60.0
+  },
+  "viewer": {
+    "camera": {
+      "position_m": [0.09, 0.09, 0.06],
+      "yaw_degrees": -135.0,
+      "pitch_degrees": -20.0
+    },
+    "render_contacts": false
+  }
+}

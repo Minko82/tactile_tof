@@ -1,5 +1,9 @@
 # ToF + Silicone Interface Simulator
 
+The separate configuration-driven mechanics workflow is documented in
+[`sim/mechanics/README.md`](mechanics/README.md). It does not modify or invoke
+the ToF simulator.
+
 This phase keeps the VL53L8CX-style 8x8 Time-of-Flight sensor backend and adds a first silicone mold exploration layer. The simulator can still run the original raw RTX Lidar scenes, but it can now place a static silicone shape in front of the sensor and post-process the 8x8 frame with an approximate optical response model.
 
 The silicone layer is intentionally approximate: it estimates surface incidence angle, Snell-style refraction through silicone, absorption/scattering loss, and a measured ToF shift. Full optical path tracing, multipath, and Newton/FEM deformation are still separate later phases.

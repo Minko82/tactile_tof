@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "material_id": "ecoflex_00_30_regression",
+  "constitutive_model": "neo_hookean",
+  "youngs_modulus_pa": 50000.0,
+  "poisson_ratio": 0.4,
+  "density_kg_m3": 1070.0,
+  "damping": {
+    "semantics": "stiffness_relative_dimensionless",
+    "value": 0.001
+  },
+  "notes": "Values are preserved from run_fingertip_sim.py. Poisson ratio is intentionally not changed during the configuration migration."
+}

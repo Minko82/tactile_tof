@@ -1,0 +1,8 @@
+# Asset preparation
+gmsh>=4.13
+trimesh>=4.6.8
+
+# Runtime mesh loading is also included by Newton's `importers` extra.
+meshio>=5.3
+numpy>=1.26
+scipy>=1.11

@@ -1,0 +1,136 @@
+{
+  "_experiment_config_path": "D:\\Machines virtueles\\tactile_tof\\sim\\config\\mechanics\\experiments\\sphere_regression.json",
+  "asset": {
+    "asset_id": "legacy_fingertip_sphere_regression",
+    "asset_semantics": "legacy_regression_proxy",
+    "mesh_units": "cm",
+    "notes": "Compatibility asset for the original sphere experiment. Prepare new hollow fingertips with prepare_fingertip.py instead.",
+    "regions_npz": "D:\\Machines virtueles\\tactile_tof\\sim\\assets\\fingertip\\mechanics_regions.npz",
+    "schema_version": 1,
+    "surface_mapping_npz": "D:\\Machines virtueles\\tactile_tof\\sim\\assets\\fingertip\\mechanics_surface_mapping.npz",
+    "surface_stl": "D:\\Machines virtueles\\tactile_tof\\sim\\assets\\fingertip\\fingertip_tet__tracked_surface.stl",
+    "volume_msh": "D:\\Machines virtueles\\tactile_tof\\sim\\assets\\fingertip\\fingertip_tet_.msh"
+  },
+  "asset_config": "D:\\Machines virtueles\\tactile_tof\\sim\\config\\mechanics\\assets\\legacy_fingertip.json",
+  "contact": {
+    "direction": [
+      0.0,
+      0.0,
+      -1.0
+    ],
+    "location_m": [
+      -0.00889358,
+      -0.00108855,
+      0.019684070719499
+    ]
+  },
+  "contact_parameters": {
+    "damping_semantics": "stiffness_relative_dimensionless",
+    "dynamic_friction": 0.0,
+    "face_mask_radius_multiplier": 2.0,
+    "force_threshold_n": 1e-06,
+    "friction_epsilon_m_s": 1e-05,
+    "margin_m": 0.0005,
+    "normal_damping": 0.0001,
+    "normal_stiffness": 10000.0,
+    "static_friction": 0.0
+  },
+  "experiment_id": "legacy_sphere_press_hold_release",
+  "fingertip_transform": {
+    "position_m": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "scale": 0.01
+  },
+  "indenter": {
+    "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "radius_m": 0.009,
+    "type": "sphere"
+  },
+  "material": {
+    "constitutive_model": "neo_hookean",
+    "damping": {
+      "semantics": "stiffness_relative_dimensionless",
+      "value": 0.001
+    },
+    "density_kg_m3": 1070.0,
+    "material_id": "ecoflex_00_30_regression",
+    "notes": "Values are preserved from run_fingertip_sim.py. Poisson ratio is intentionally not changed during the configuration migration.",
+    "poisson_ratio": 0.4,
+    "schema_version": 1,
+    "youngs_modulus_pa": 50000.0
+  },
+  "material_config": "D:\\Machines virtueles\\tactile_tof\\sim\\config\\mechanics\\materials\\ecoflex_00_30.json",
+  "monitoring": {
+    "engineering_strain_limit": 0.3,
+    "maximum_rest_tet_condition_number": 100.0,
+    "minimum_relative_tet_volume": 0.15,
+    "minimum_rest_tet_quality": 0.01,
+    "minimum_rest_tet_volume_m3": 1e-18,
+    "nominal_wall_thickness_m": 0.003,
+    "tet_check_interval_substeps": 5
+  },
+  "output": {
+    "directory": "D:\\Machines virtueles\\tactile_tof\\sim\\output\\mechanics\\sphere_regression",
+    "rate_hz": 60.0
+  },
+  "schema_version": 1,
+  "solver": {
+    "gravity_m_s2": -9.81,
+    "particle_collision_detection_interval": -1,
+    "particle_enable_self_contact": false,
+    "particle_enable_tile_solve": true,
+    "particle_radius_edge_fraction": 0.35,
+    "rigid_body_particle_contact_buffer_size": 256,
+    "simulation_fps": 60,
+    "substeps": 20,
+    "vbd_iterations": 15
+  },
+  "trajectory": {
+    "clearance_m": 0.0005,
+    "durations_s": {
+      "approach": 0.25,
+      "hold": 1.0,
+      "press": 0.375,
+      "recovery": 1.0,
+      "release": 0.625
+    },
+    "easing": "linear",
+    "indentation_m": 0.00075,
+    "lateral_slip": {
+      "direction": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "distance_m": 0.0,
+      "duration_s": 0.5,
+      "enabled": false
+    }
+  },
+  "viewer": {
+    "camera": {
+      "pitch_degrees": -20.0,
+      "position_m": [
+        0.08,
+        0.08,
+        0.04
+      ],
+      "yaw_degrees": -135.0
+    },
+    "render_contacts": false
+  }
+}
