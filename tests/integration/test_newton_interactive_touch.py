@@ -9,7 +9,6 @@ import pytest
 
 from .helpers import REPO_ROOT, require_newton_runtime
 
-
 pytestmark = pytest.mark.newton_integration
 
 BASE_CONFIG = REPO_ROOT / "sim/config/mechanics/experiments/interactive_manual.json"
@@ -30,8 +29,6 @@ def _abbreviated_interactive_config(tmp_path: Path) -> Path:
     }
     config["solver"].update(
         {
-            "substeps": 10,
-            "vbd_iterations": 10,
             "newton_strict": True,
         }
     )

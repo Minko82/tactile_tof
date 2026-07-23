@@ -11,6 +11,28 @@ are provisional. Contact area, reaction, and tangential relative velocity are
 estimates reconstructed from Newton's VBD penalty-contact arrays—not exact force
 ground truth or a complete stick–slip model.
 
+## Current material profile
+
+Active mechanics experiments use **Smooth-On SORTA-Clear 37** through
+`sim/config/mechanics/materials/sorta_clear_37_provisional.json`.
+
+- Mechanical parameters: **provisional**
+- Physical force calibration: **pending**
+- Required calibration: real press-hold-release tests with synchronized
+  load-cell and displacement data
+
+The manufacturer reports a density of 1.08 g/cm³ and a 100% tensile modulus of
+90 psi after seven days at 23°C. The provisional profile does not use 90 psi
+directly as Young's modulus. It fits that single point to an incompressible
+Neo-Hookean nominal-stress relation at stretch 2, producing an initial
+small-strain estimate of `E = 1.064 MPa`. Poisson ratio `0.47` and relative
+damping `0.002` are uncalibrated engineering starting assumptions.
+
+These values are not physical force ground truth. Replace them with parameters
+fitted to the manufactured fingertip, batch, cure, coating, geometry, and mount.
+The old `ecoflex_00_30.json` remains available only as a clearly labeled legacy
+regression profile.
+
 ## Prepare a new fingertip
 
 The input STL must be the positive cured silicone body, not the negative mold.
@@ -217,7 +239,7 @@ deterministic. Repeatability is checked numerically, not claimed bitwise.
 
 Every output directory is self-contained:
 
-- `run_config.json`, `asset_manifest.json`, `regions.npz`,
+- `run_config.json`, `asset_manifest.json`, `material_profile.json`, `regions.npz`,
   `surface_mapping.npz`, and `newton_environment.json` describe the run;
 - `frames_00000.npz`, `frames_00001.npz`, and so on contain bounded chunks;
 - `frames_manifest.json` lists and versions the chunks;

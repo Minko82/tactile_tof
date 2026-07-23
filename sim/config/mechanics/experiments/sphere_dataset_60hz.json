@@ -2,7 +2,7 @@
   "schema_version": 1,
   "experiment_id": "legacy_sphere_dataset_60hz",
   "asset_config": "../assets/legacy_fingertip.json",
-  "material_config": "../materials/ecoflex_00_30.json",
+  "material_config": "../materials/sorta_clear_37_provisional.json",
   "fingertip_transform": {
     "position_m": [0.0, 0.0, 0.0],
     "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],

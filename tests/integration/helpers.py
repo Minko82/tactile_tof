@@ -3,15 +3,14 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from sim.mechanics.exporter import load_frame_chunks
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BASE_CONFIG = REPO_ROOT / "sim/config/mechanics/experiments/sphere_visible_demo.json"
@@ -51,8 +50,6 @@ def abbreviated_config(tmp_path: Path, name: str) -> Path:
     }
     config["solver"].update(
         {
-            "substeps": 10,
-            "vbd_iterations": 10,
             "deterministic": True,
             "newton_strict": True,
         }

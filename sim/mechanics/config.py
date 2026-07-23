@@ -10,9 +10,9 @@ from typing import Any
 
 from .schema import MECHANICS_OUTPUT_SCHEMA_VERSION
 
-
 SUPPORTED_CONFIG_SCHEMA_VERSION = 1
 SUPPORTED_DAMPING_SEMANTICS = {"stiffness_relative_dimensionless"}
+SUPPORTED_CALIBRATION_STATES = {"provisional", "calibrating", "calibrated"}
 
 VIDEO_DEFAULTS: dict[str, Any] = {
     "enabled": False,
@@ -131,6 +131,20 @@ def _resolve_path(base: Path, value: Any, context: str) -> str:
     if not candidate.is_absolute():
         candidate = base / candidate
     return str(candidate.resolve())
+
+
+def _normalize_material_metadata(material: dict[str, Any]) -> dict[str, Any]:
+    """Keep older profiles loadable while making provenance explicit."""
+
+    resolved = copy.deepcopy(material)
+    resolved.setdefault("manufacturer", None)
+    resolved.setdefault("product_family", None)
+    resolved.setdefault("grade", None)
+    resolved.setdefault("batch_id", None)
+    resolved.setdefault("calibration_status", "provisional")
+    resolved.setdefault("parameter_source", "unspecified")
+    resolved.setdefault("calibration_report", None)
+    return resolved
 
 
 def _prepare_interactive_compatibility(
@@ -448,7 +462,7 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
         )
     )
     asset = _read_json(asset_path)
-    material = _read_json(material_path)
+    material = _normalize_material_metadata(_read_json(material_path))
     _schema_version(asset, "asset config")
     _schema_version(material, "material config")
     _require(
@@ -458,7 +472,14 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
     )
     _require(
         material,
-        ("youngs_modulus_pa", "poisson_ratio", "density_kg_m3", "damping"),
+        (
+            "material_id",
+            "constitutive_model",
+            "youngs_modulus_pa",
+            "poisson_ratio",
+            "density_kg_m3",
+            "damping",
+        ),
         "material config",
     )
 
@@ -570,8 +591,19 @@ def validate_run_config(config: dict[str, Any]) -> None:
     _schema_version(material, "material config")
     _require(
         material,
-        ("youngs_modulus_pa", "poisson_ratio", "density_kg_m3", "damping"),
+        (
+            "material_id",
+            "constitutive_model",
+            "youngs_modulus_pa",
+            "poisson_ratio",
+            "density_kg_m3",
+            "damping",
+        ),
         "material config",
+    )
+    _nonempty_string(material["material_id"], "material material_id")
+    _nonempty_string(
+        material["constitutive_model"], "material constitutive_model"
     )
     _positive(material["youngs_modulus_pa"], "material Young's modulus")
     poisson = _finite_scalar(material["poisson_ratio"], "material Poisson ratio")
@@ -579,8 +611,34 @@ def validate_run_config(config: dict[str, Any]) -> None:
     if not (-1.0 < poisson < 0.5):
         raise ConfigError("material Poisson ratio must be in (-1, 0.5)")
     damping = _mapping(material["damping"], "material damping")
-    _require(damping, ("value",), "material damping")
+    _require(damping, ("semantics", "value"), "material damping")
+    damping_semantics = _nonempty_string(
+        damping["semantics"], "material damping semantics"
+    )
+    if damping_semantics not in SUPPORTED_DAMPING_SEMANTICS:
+        raise ConfigError(
+            "material damping semantics must be one of "
+            f"{sorted(SUPPORTED_DAMPING_SEMANTICS)}"
+        )
     _positive(damping["value"], "material damping value", allow_zero=True)
+
+    for field in ("manufacturer", "product_family", "grade"):
+        value = material.get(field)
+        if value is not None:
+            _nonempty_string(value, f"material {field}")
+    for field in ("batch_id", "calibration_report"):
+        value = material.get(field)
+        if value is not None:
+            _nonempty_string(value, f"material {field}")
+    calibration_status = _nonempty_string(
+        material.get("calibration_status"), "material calibration_status"
+    )
+    if calibration_status not in SUPPORTED_CALIBRATION_STATES:
+        raise ConfigError(
+            "material calibration_status must be one of "
+            f"{sorted(SUPPORTED_CALIBRATION_STATES)}"
+        )
+    _nonempty_string(material.get("parameter_source"), "material parameter_source")
 
     contact = _mapping(config.get("contact"), "contact")
     _require(contact, ("location_m", "direction"), "contact")

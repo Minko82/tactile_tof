@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "material_id": "sorta_clear_37_provisional",
+  "manufacturer": "Smooth-On",
+  "product_family": "SORTA-Clear",
+  "grade": "37",
+  "batch_id": null,
+  "calibration_status": "provisional",
+  "constitutive_model": "neo_hookean",
+  "youngs_modulus_pa": 1064000.0,
+  "poisson_ratio": 0.47,
+  "density_kg_m3": 1080.0,
+  "damping": {
+    "semantics": "stiffness_relative_dimensionless",
+    "value": 0.002
+  },
+  "parameter_source": "manufacturer_density_and_one_point_neo_hookean_estimate_plus_engineering_assumptions",
+  "calibration_report": null,
+  "manufacturer_reference_url": "https://www.smooth-on.com/tb/files/SORTA_CLEAR_SERIES_TB.pdf",
+  "reference_measurements": {
+    "temperature_c": 23.0,
+    "age_days": 7,
+    "specific_gravity_g_cm3": 1.08,
+    "hundred_percent_modulus_psi": 90.0,
+    "hundred_percent_modulus_pa": 620528.2
+  },
+  "estimate_method": "At stretch lambda=2, fit the reported 100% nominal tensile modulus to incompressible neo-Hookean P=mu*(lambda-lambda^-2), then use small-strain E=3*mu. Poisson ratio and damping are uncalibrated engineering starting assumptions.",
+  "notes": "Uncalibrated starting profile; not physical force ground truth. Fit against press-hold-release load-cell data from the manufactured fingertip before quantitative use."
+}

@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import json
 import math
-from pathlib import Path
 import shutil
+import warnings
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-import warnings
-
-import numpy as np
-import warp as wp
 
 import newton
+import numpy as np
+import warp as wp
 from newton.solvers import SolverVBD
 
 from .config import load_run_config, material_lame_parameters
@@ -85,6 +84,32 @@ def _copy_if_different(source: str | Path, destination: Path) -> None:
     source_path = Path(source).resolve()
     if source_path != destination.resolve():
         shutil.copy2(source_path, destination)
+
+
+def _material_provenance(material: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "material_id": material["material_id"],
+        "manufacturer": material.get("manufacturer"),
+        "product_family": material.get("product_family"),
+        "grade": material.get("grade"),
+        "batch_id": material.get("batch_id"),
+        "calibration_status": material["calibration_status"],
+        "constitutive_model": material["constitutive_model"],
+        "youngs_modulus_pa": float(material["youngs_modulus_pa"]),
+        "poisson_ratio": float(material["poisson_ratio"]),
+        "density_kg_m3": float(material["density_kg_m3"]),
+        "damping": dict(material["damping"]),
+        "parameter_source": material["parameter_source"],
+        "calibration_report": material.get("calibration_report"),
+    }
+
+
+def _material_display_name(material: dict[str, Any]) -> str:
+    family = material.get("product_family")
+    grade = material.get("grade")
+    if family and grade:
+        return f"{family} {grade}"
+    return str(family or material["material_id"])
 
 
 class TouchMechanicsControllerV2:
@@ -250,6 +275,7 @@ class TouchMechanicsControllerV2:
         self.current_body_position = self.indenter_start_position.copy()
 
         material = self.config["material"]
+        self.material_provenance = _material_provenance(material)
         mu, lam = material_lame_parameters(material)
         builder = newton.ModelBuilder(gravity=float(solver_cfg["gravity_m_s2"]))
         self.particle_start = len(builder.particle_q)
@@ -468,6 +494,7 @@ class TouchMechanicsControllerV2:
             ),
             "ui_metrics_rate_hz": float(monitor_cfg["ui_metrics_rate_hz"]),
             "output_rate_hz": output_rate_hz,
+            "material_profile": self.material_provenance,
         }
         self.config["output_metadata"] = {
             key: self.environment[key]
@@ -482,12 +509,17 @@ class TouchMechanicsControllerV2:
                 "slip_validated",
             )
         }
+        self.config["output_metadata"]["material_profile"] = self.material_provenance
         self._warn_provisional_shear_configuration()
 
         self.exporter = MechanicalDataExporter(
             args.output_dir or self.config["output"]["directory"], self.config
         )
         _write_json(self.exporter.output_dir / "asset_manifest.json", asset)
+        _write_json(
+            self.exporter.output_dir / "material_profile.json",
+            material,
+        )
         _copy_if_different(
             asset["regions_npz"], self.exporter.output_dir / "regions.npz"
         )
@@ -518,6 +550,7 @@ class TouchMechanicsControllerV2:
                 include_ui=bool(video_cfg["include_ui"]),
             )
 
+        self._print_material_status(material)
         print(
             f"[mechanics] asset={asset.get('asset_id', asset['volume_msh'])} "
             f"particles={self.particle_end - self.particle_start} tets={len(local_tets)} "
@@ -538,6 +571,19 @@ class TouchMechanicsControllerV2:
                 f"{self.equilibration_config['maximum_duration_s']} s"
             )
         self._export_frame(0.0, "initialization")
+
+    def _print_material_status(self, material: dict[str, Any]) -> None:
+        label = _material_display_name(material)
+        status = str(material["calibration_status"])
+        if status == "provisional":
+            print(
+                f"[material] {label} - "
+                "PROVISIONAL / NOT PHYSICALLY CALIBRATED"
+            )
+        elif status == "calibrating":
+            print(f"[material] {label} - CALIBRATION IN PROGRESS")
+        else:
+            print(f"[material] {label} - calibrated material profile")
 
     def _configure_video(self, args: Any) -> None:
         video_cfg = self.config["video"]

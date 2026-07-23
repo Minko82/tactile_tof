@@ -6,7 +6,6 @@ import pytest
 
 from .helpers import abbreviated_config, run_rollout, run_rollout_process
 
-
 pytestmark = pytest.mark.newton_integration
 
 
@@ -70,10 +69,21 @@ def test_real_newton_touch_rollout_settles_contacts_and_releases(tmp_path):
         environment["maximum_contact_count_observed"]
         < environment["configured_contact_capacity"]
     )
+    assert environment["material_profile"]["material_id"] == (
+        "sorta_clear_37_provisional"
+    )
+    assert environment["material_profile"]["calibration_status"] == "provisional"
+    material_profile = json.loads(
+        (output_dir / "material_profile.json").read_text(encoding="utf-8")
+    )
+    assert material_profile["manufacturer"] == "Smooth-On"
+    assert material_profile["product_family"] == "SORTA-Clear"
+    assert material_profile["grade"] == "37"
 
     for filename in (
         "run_config.json",
         "asset_manifest.json",
+        "material_profile.json",
         "regions.npz",
         "surface_mapping.npz",
         "newton_environment.json",

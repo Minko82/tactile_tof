@@ -10,7 +10,7 @@ Build a reproducible, experimentally validated simulator for the TouchIQ fingert
 
 1. accepts an arbitrary **positive cured-silicone fingertip body** without source-code changes;
 2. simulates its deformation, contact, recovery, and later shear/slip behavior in NVIDIA Newton;
-3. produces **physically calibrated Ecoflex force estimates**, with quantified error against real load-cell or force/torque measurements;
+3. produces **physically calibrated SORTA-Clear 37 force estimates**, with quantified error against real load-cell or force/torque measurements;
 4. transfers the deformed sensor-facing coating surface into the validated ToF simulator;
 5. reproduces the real sensor's 8×8 spatial and temporal behavior closely enough for engineering decisions and sim-to-real learning;
 6. records every geometry, material, solver, calibration, and software detail needed to reproduce a run.
@@ -21,7 +21,7 @@ A visually plausible simulation is not sufficient. Quantitative claims must be s
 
 ### 2.1 Validate subsystems before coupling them
 
-Validate the naked ToF sensor, fingertip mechanics, Ecoflex material model, and coating/optical behavior independently. Couple them only after each subsystem has a measured baseline.
+Validate the naked ToF sensor, fingertip mechanics, SORTA-Clear 37 material model, and coating/optical behavior independently. Couple them only after each subsystem has a measured baseline.
 
 ### 2.2 Use the correct geometry
 
@@ -68,6 +68,16 @@ Every calibrated parameter set must include its source trials, fit method, valid
 - robot-policy training or deployment.
 
 ## 4. Required development milestones
+
+### Current material status
+
+- Current mechanics material: **Smooth-On SORTA-Clear 37**
+- Mechanical parameters: **provisional**
+- Physical force calibration: **pending**
+- Required calibration: real press-hold-release tests with synchronized load-cell and displacement data
+
+The active starting profile is not physically calibrated and its reconstructed
+reaction fields remain estimates.
 
 ## M0 — Freeze the naked ToF baseline
 
@@ -137,7 +147,7 @@ Required runtime protections:
 
 **Gate:** representative normal-indentation runs complete without inversion, contact truncation, or discontinuous loading.
 
-## M3 — Physically calibrate Ecoflex normal forces
+## M3 — Physically calibrate SORTA-Clear 37 normal forces
 
 This milestone is mandatory before the simulator may claim physically meaningful force values.
 
@@ -196,7 +206,7 @@ These targets may be tightened after the measurement system's uncertainty is cha
 
 A force output may be called **physically calibrated** only when these or an approved replacement set of held-out criteria is met.
 
-**Gate:** a versioned Ecoflex material profile predicts unseen normal-indentation trials within the agreed tolerance without per-trial retuning.
+**Gate:** a versioned SORTA-Clear 37 material profile predicts unseen normal-indentation trials within the agreed tolerance without per-trial retuning.
 
 ## M4 — Calibrate shear, friction, and slip
 
@@ -320,7 +330,7 @@ The fingertip simulation is considered complete for engineering and sim-to-real 
 1. A new positive silicone-body design can be prepared and simulated without changing Python source.
 2. Geometry, units, wall thickness, region selection, tet quality, and provenance are validated.
 3. Normal press-hold-release mechanics are stable and numerically converged.
-4. Ecoflex force predictions pass held-out physical calibration criteria and include uncertainty.
+4. SORTA-Clear 37 force predictions pass held-out physical calibration criteria and include uncertainty.
 5. Recovery and hysteresis are reproduced over the declared operating range.
 6. Shear and slip are either physically validated or explicitly excluded from claims and labels.
 7. The deformed coating is coupled to the frozen ToF simulator without a global contact switch.

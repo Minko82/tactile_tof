@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ###########################################################################
+# LEGACY ECOFLEX REGRESSION RUNNER — NOT THE ACTIVE TOUCHIQ MATERIAL
+#
+# The configuration-driven runners use SORTA-Clear 37. This file is retained
+# only so historical Ecoflex mechanics experiments remain reproducible.
+#
 # Ecoflex Fingertip Soft-Body Simulation (Step 3 validation)
 #
 # Loads the wildmeshing-generated tetrahedral mesh for the silicone fingertip,
@@ -47,12 +52,10 @@ _LOCAL_NEWTON_ROOT = os.path.abspath(
 if os.path.isdir(os.path.join(_LOCAL_NEWTON_ROOT, "newton")):
     sys.path.insert(0, _LOCAL_NEWTON_ROOT)
 
-import warp as wp
-
 import newton
 import newton.examples
+import warp as wp
 from newton.solvers import SolverVBD
-
 
 # ---------------------------------------------------------------------------
 # Ecoflex 00-30 mechanical / constitutive parameters
@@ -521,6 +524,10 @@ class FingertipController:
 
         # Worked sensitivity estimate (paper):
         #   For t0=3 mm, E=50 kPa, A=78.5 mm^2: d(d_rep)/dF ~= 1.07 mm/N
+        print(
+            "[material] LEGACY Ecoflex 00-30 regression runner - "
+            "not the active TouchIQ material"
+        )
         print(
             f"[fingertip] particles={particle_end - particle_start} "
             f"anchored={num_anchored}"
