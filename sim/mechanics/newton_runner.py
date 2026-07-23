@@ -24,6 +24,8 @@ from .contact import (
     masked_triangle_area,
 )
 from .exporter import MechanicalDataExporter, export_failure_state
+from .gpu_monitoring import GpuSafetyMonitor, GpuSafetySnapshot
+from .gpu_stepper import GpuFrameStepper
 from .indenter import (
     indenter_contact_translation,
     normalized_quaternion_xyzw,
@@ -113,7 +115,10 @@ class TouchMechanicsControllerV2:
         self.substep = 0
         self.trajectory_substep = 0
         self.next_output_time = 0.0
-        self.output_period = 1.0 / float(self.config["output"]["rate_hz"])
+        output_rate_hz = float(self.config["output"]["rate_hz"])
+        self.output_period = (
+            math.inf if output_rate_hz <= 0.0 else 1.0 / output_rate_hz
+        )
         self.lifecycle_phase = "initialization"
         self.finalized = False
         self.video_recorder: VideoRecorder | None = None
@@ -364,6 +369,65 @@ class TouchMechanicsControllerV2:
         ].astype(np.float64)
         self.particle_radii = self.model.particle_radius.numpy().astype(np.float64)
 
+        interactive_mode = self.config.get("mode") == "interactive_manual"
+        fatal_minimum_j = float(
+            self.config["monitoring"]["minimum_relative_tet_volume"]
+        )
+        if interactive_mode:
+            manual_safety = self.config["manual_control"]["safety"]
+            warning_minimum_j = float(
+                manual_safety["warning_minimum_relative_tet_volume"]
+            )
+            stop_minimum_j = float(
+                manual_safety["stop_minimum_relative_tet_volume"]
+            )
+            maximum_commanded_indentation_m = float(
+                self.config["asset"]["interactive_safety"][
+                    "maximum_commanded_indentation_m"
+                ]
+            )
+            retraction_clearance_m = float(
+                manual_safety["retraction_clearance_m"]
+            )
+        else:
+            warning_minimum_j = fatal_minimum_j
+            stop_minimum_j = fatal_minimum_j
+            maximum_commanded_indentation_m = -1.0
+            retraction_clearance_m = 0.0
+        self.gpu_monitor = GpuSafetyMonitor(
+            device=self.model.device,
+            tet_indices=self.mapping_tets,
+            rest_volumes=self.rest_volumes,
+            particle_start=self.particle_start,
+            free_particle_indices=self.free_particle_local_indices,
+            warning_minimum_j=warning_minimum_j,
+            stop_minimum_j=stop_minimum_j,
+            fatal_minimum_j=fatal_minimum_j,
+            contact_counts=self.contact_buffer_counts,
+            contact_body_index=self.indenter_body,
+            contact_capacity=self.contact_buffer_capacity,
+            fatal_on_contact_saturation=not interactive_mode,
+        )
+        self.gpu_stepper = GpuFrameStepper(
+            model=self.model,
+            state_0=self.state_0,
+            state_1=self.state_1,
+            control=self.control,
+            contacts=self.contacts,
+            collision_pipeline=self.collision_pipeline,
+            solver=self.solver,
+            monitor=self.gpu_monitor,
+            probe_body=self.indenter_body,
+            sim_substeps=self.sim_substeps,
+            sim_dt=self.sim_dt,
+            maximum_commanded_indentation_m=maximum_commanded_indentation_m,
+            recoverable_stop=interactive_mode,
+            retraction_clearance_m=retraction_clearance_m,
+            reject_on_frame_fatal=True,
+            cuda_graph_requested=bool(solver_cfg["cuda_graph"]),
+        )
+        self.last_gpu_safety_snapshot: GpuSafetySnapshot | None = None
+
         device = self.model.device
         self.environment = {
             "newton_version": self.newton_version,
@@ -394,6 +458,16 @@ class TouchMechanicsControllerV2:
             ),
             "requested_clearance_m": requested_clearance_m,
             "effective_clearance_m": settling_gap_m,
+            "gpu_safety_monitoring": True,
+            "cuda_graph_requested": bool(solver_cfg["cuda_graph"]),
+            "cuda_graph_supported": self.gpu_stepper.cuda_graph_supported,
+            "cuda_graph_enabled": False,
+            "cuda_graph_error": "",
+            "host_readback_policy": (
+                "compact_per_frame; full_only_scheduled_metrics_export_snapshot_or_safety"
+            ),
+            "ui_metrics_rate_hz": float(monitor_cfg["ui_metrics_rate_hz"]),
+            "output_rate_hz": output_rate_hz,
         }
         self.config["output_metadata"] = {
             key: self.environment[key]
@@ -531,38 +605,74 @@ class TouchMechanicsControllerV2:
                 cfg=shape_cfg,
             )
 
-    def _command_indenter(self, state, trajectory_time_s: float) -> None:
-        sample = self.trajectory.sample(trajectory_time_s)
-        if self.lifecycle_phase == "settling":
-            position = self.indenter_settling_position
-            velocity = np.zeros(3, dtype=np.float64)
-        else:
-            position = (
-                self.indenter_start_position
-                + self.loading_direction * sample.normal_travel_m
-                + sample.lateral_offset_m
-            )
-            velocity = (
-                self.loading_direction * sample.normal_velocity_m_s
-                + sample.lateral_velocity_m_s
-            )
-        q = self.indenter_quaternion
-        wp.launch(
-            _set_kinematic_pose_v2,
-            dim=1,
-            inputs=[
-                self.indenter_body,
-                *position,
-                *q,
-                *velocity,
-                *self.current_body_angular_velocity,
-            ],
-            outputs=[state.body_q, state.body_qd],
-            device=self.model.device,
+    def _prepare_gpu_command_batch(
+        self, *, advance_trajectory: bool
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        transforms = np.empty((self.sim_substeps, 7), dtype=np.float32)
+        velocities = np.zeros((self.sim_substeps, 6), dtype=np.float32)
+        commanded_indentation = np.zeros(self.sim_substeps, dtype=np.float32)
+        last_sample = self.current_sample
+        last_position = self.current_body_position
+        last_velocity = self.current_body_velocity
+        for substep_index in range(self.sim_substeps):
+            if advance_trajectory:
+                self.trajectory_substep += 1
+                command_time = self.trajectory_substep * self.sim_dt
+                sample = self.trajectory.sample(command_time)
+                position = (
+                    self.indenter_start_position
+                    + self.loading_direction * sample.normal_travel_m
+                    + sample.lateral_offset_m
+                )
+                velocity = (
+                    self.loading_direction * sample.normal_velocity_m_s
+                    + sample.lateral_velocity_m_s
+                )
+                indentation = self.trajectory.nominal_indentation_m(sample)
+            else:
+                sample = self.trajectory.sample(0.0)
+                position = self.indenter_settling_position
+                velocity = np.zeros(3, dtype=np.float64)
+                indentation = 0.0
+            transforms[substep_index, :3] = position
+            transforms[substep_index, 3:] = self.indenter_quaternion
+            velocities[substep_index, :3] = velocity
+            commanded_indentation[substep_index] = indentation
+            last_sample = sample
+            last_position = position
+            last_velocity = velocity
+        self.current_sample = last_sample
+        self.current_body_position = np.asarray(last_position, dtype=np.float64).copy()
+        self.current_body_velocity = np.asarray(last_velocity, dtype=np.float64).copy()
+        self.current_body_angular_velocity.fill(0.0)
+        return transforms, velocities, commanded_indentation
+
+    def _update_gpu_environment(self) -> None:
+        self.environment.update(
+            {
+                "cuda_graph_enabled": self.gpu_stepper.graph_enabled,
+                "cuda_graph_error": self.gpu_stepper.cuda_graph_error,
+            }
         )
-        self.current_sample = sample
-        self.current_body_position = position
-        self.current_body_velocity = velocity
+
+    def _capture_gpu_frame_graph(self) -> None:
+        if self.gpu_stepper.graph_enabled:
+            return
+        transforms, velocities, indentation = self._prepare_gpu_command_batch(
+            advance_trajectory=False
+        )
+        self.gpu_stepper.upload_commands(transforms, velocities, indentation)
+        captured = self.gpu_stepper.capture(include_free_speed=False)
+        self._update_gpu_environment()
+        self._write_environment()
+        if captured:
+            print("[mechanics] CUDA graph capture enabled for the GPU physics frame")
+        elif self.gpu_stepper.cuda_graph_requested:
+            print(
+                "[mechanics] WARNING: CUDA graph capture unavailable; "
+                "using the same GPU-only frame path without capture. "
+                f"{self.gpu_stepper.cuda_graph_error}"
+            )
 
     def _refresh_contact_buffer_environment(self) -> None:
         if not hasattr(self, "environment"):
@@ -585,61 +695,75 @@ class TouchMechanicsControllerV2:
             }
         )
 
-    def _monitor_contact_buffer(self) -> None:
-        observed = int(self.contact_buffer_counts.numpy()[self.indenter_body])
-        self.current_contact_buffer_count = observed
-        self.maximum_contact_buffer_count = max(
-            self.maximum_contact_buffer_count, observed
-        )
-        if observed < self.contact_buffer_capacity:
-            return
-
-        self.contact_buffer_saturated = True
-        if self.first_contact_buffer_saturation_substep < 0:
-            self.first_contact_buffer_saturation_frame = self.exporter.frame_count
-            self.first_contact_buffer_saturation_substep = self.substep
+    def _apply_gpu_safety_snapshot(self, snapshot: GpuSafetySnapshot) -> None:
+        self.last_gpu_safety_snapshot = snapshot
+        self.current_contact_buffer_count = snapshot.contact_count
+        self.maximum_contact_buffer_count = snapshot.run_maximum_contact_count
+        if snapshot.contact_buffer_saturated:
+            self.contact_buffer_saturated = True
+            if self.first_contact_buffer_saturation_substep < 0:
+                self.first_contact_buffer_saturation_frame = self.exporter.frame_count
+                self.first_contact_buffer_saturation_substep = self.substep
         self._refresh_contact_buffer_environment()
-        self._write_environment()
+
+    def _handle_gpu_fatal_state(self, snapshot: GpuSafetySnapshot) -> None:
+        particles = self._particle_positions()
+        relative = self._relative_tet_volumes(particles)
+        threshold = float(self.config["monitoring"]["minimum_relative_tet_volume"])
+        bad = np.flatnonzero(~np.isfinite(relative) | (relative < threshold))
+        reason = (
+            "contact_buffer_saturation"
+            if snapshot.contact_buffer_saturated and not len(bad)
+            else snapshot.reason or "minimum_relative_tet_volume"
+        )
         export_failure_state(
             self.failure_path,
-            particle_q=self._particle_positions(),
-            sim_time_s=np.float64(self.substep * self.sim_dt),
-            trajectory_phase=np.asarray(self._phase_name()),
-            failure_reason=np.asarray("contact_buffer_saturation"),
+            particle_q=particles,
+            current_tet_volumes=relative * self.rest_volumes,
+            rest_tet_volumes=self.rest_volumes,
+            relative_j=relative,
+            bad_tet_indices=bad,
+            relative_j_threshold=np.float64(threshold),
+            first_affected_tet_id=np.int32(snapshot.first_affected_tet_id),
+            nonfinite_tet_count=np.int32(snapshot.nonfinite_tet_count),
+            inverted_tet_count=np.int32(snapshot.inverted_tet_count),
             configured_contact_capacity=np.int32(self.contact_buffer_capacity),
-            observed_contact_count=np.int32(observed),
-            first_saturation_frame=np.int64(self.first_contact_buffer_saturation_frame),
-            first_saturation_substep=np.int64(
-                self.first_contact_buffer_saturation_substep
+            observed_contact_count=np.int32(snapshot.contact_count),
+            failure_reason=np.asarray(reason),
+            substep=np.int64(self.substep),
+            sim_time_s=np.float64(self.sim_time),
+            trajectory_phase=np.asarray(self._phase_name()),
+            nominal_indentation_m=np.float64(
+                self.trajectory.nominal_indentation_m(self.current_sample)
             ),
+            newton_version=np.asarray(self.newton_version),
+            newton_git_sha=np.asarray(self.newton_revision),
         )
-        self.exporter.finalize()
-        raise RuntimeError(
-            "Rigid-body particle-contact buffer saturated: "
-            f"observed {observed}, capacity {self.contact_buffer_capacity}; "
-            "increase rigid_body_particle_contact_buffer_size"
+        self.finalize()
+        if reason == "contact_buffer_saturation":
+            raise RuntimeError(
+                "Rigid-body particle-contact buffer saturated: "
+                f"observed {snapshot.contact_count}, "
+                f"capacity {self.contact_buffer_capacity}; "
+                "increase rigid_body_particle_contact_buffer_size"
+            )
+        raise FloatingPointError(
+            f"GPU mechanics safety circuit breaker: {reason}; "
+            f"state saved to {self.failure_path}"
         )
 
     def simulate(self, *, advance_trajectory: bool) -> None:
-        for _ in range(self.sim_substeps):
-            self.state_0.clear_forces()
-            self.state_1.clear_forces()
-            if advance_trajectory:
-                self.trajectory_substep += 1
-                command_time = self.trajectory_substep * self.sim_dt
-            else:
-                command_time = 0.0
-            self._command_indenter(self.state_0, command_time)
-            self.collision_pipeline.collide(self.state_0, self.contacts)
-            self.solver.step(
-                self.state_0, self.state_1, self.control, self.contacts, self.sim_dt
-            )
-            self.substep += 1
-            self.state_0, self.state_1 = self.state_1, self.state_0
-            self._monitor_contact_buffer()
-            interval = int(self.config["monitoring"]["tet_check_interval_substeps"])
-            if self.substep % interval == 0:
-                self._check_tet_state()
+        transforms, velocities, indentation = self._prepare_gpu_command_batch(
+            advance_trajectory=advance_trajectory
+        )
+        self.gpu_stepper.upload_commands(transforms, velocities, indentation)
+        snapshot = self.gpu_stepper.run_frame(
+            include_free_speed=not advance_trajectory
+        )
+        self.substep += self.sim_substeps
+        self._apply_gpu_safety_snapshot(snapshot)
+        if snapshot.fatal:
+            self._handle_gpu_fatal_state(snapshot)
 
     def _particle_positions(self) -> np.ndarray:
         return self.state_0.particle_q.numpy()[
@@ -656,35 +780,6 @@ class TouchMechanicsControllerV2:
         if self.trajectory_time_s > self.trajectory.total_duration_s + 1.0e-12:
             return "post_recovery"
         return self.trajectory.sample(self.trajectory_time_s).phase
-
-    def _check_tet_state(self) -> None:
-        particles = self._particle_positions()
-        relative = self._relative_tet_volumes(particles)
-        threshold = float(self.config["monitoring"]["minimum_relative_tet_volume"])
-        bad = np.flatnonzero(~np.isfinite(relative) | (relative < threshold))
-        if not len(bad):
-            return
-        export_failure_state(
-            self.failure_path,
-            particle_q=particles,
-            current_tet_volumes=relative * self.rest_volumes,
-            rest_tet_volumes=self.rest_volumes,
-            relative_j=relative,
-            bad_tet_indices=bad,
-            relative_j_threshold=np.float64(threshold),
-            substep=np.int64(self.substep),
-            sim_time_s=np.float64(self.sim_time),
-            trajectory_phase=np.asarray(self._phase_name()),
-            nominal_indentation_m=np.float64(
-                self.trajectory.nominal_indentation_m(self.current_sample)
-            ),
-            newton_version=np.asarray(self.newton_version),
-            newton_git_sha=np.asarray(self.newton_revision),
-        )
-        self.finalize()
-        raise FloatingPointError(
-            f"relative tet volume crossed {threshold:g}; state saved to {self.failure_path}"
-        )
 
     def _contact_summary(
         self, current_global: np.ndarray, previous_global: np.ndarray
@@ -763,7 +858,9 @@ class TouchMechanicsControllerV2:
 
     def _export_frame(self, time_s: float, phase: str | None = None) -> None:
         current_global = self.state_0.particle_q.numpy().astype(np.float64)
-        previous_global = self.state_1.particle_q.numpy().astype(np.float64)
+        previous_global = (
+            self.gpu_stepper.previous_particle_q_device.numpy().astype(np.float64)
+        )
         particles = current_global[self.particle_start : self.particle_end]
         deformed_surface = reconstruct_surface(
             particles, self.mapping_tets, self.surface_mapping
@@ -923,19 +1020,19 @@ class TouchMechanicsControllerV2:
         self._write_environment()
         self._export_frame(self.sim_time, "capture_baseline")
         self.next_output_time = self.sim_time
+        self._capture_gpu_frame_graph()
 
     def _step_settling(self) -> None:
         self.lifecycle_phase = "settling"
         self.simulate(advance_trajectory=False)
         self.sim_time += self.frame_dt
         self.equilibration_elapsed_s += self.frame_dt
-        velocities = self.state_0.particle_qd.numpy()[
-            self.particle_start : self.particle_end
-        ].astype(np.float64)
-        free_speeds = np.linalg.norm(
-            velocities[self.free_particle_local_indices], axis=1
+        snapshot = self.last_gpu_safety_snapshot
+        if snapshot is None:
+            raise RuntimeError("GPU safety monitor produced no settling metrics")
+        self.max_free_particle_speed_m_s = (
+            snapshot.maximum_free_particle_speed_m_s
         )
-        self.max_free_particle_speed_m_s = float(np.max(free_speeds))
         minimum = float(self.equilibration_config["minimum_duration_s"])
         tolerance = float(self.equilibration_config["velocity_tolerance_m_s"])
         if (

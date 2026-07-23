@@ -130,6 +130,58 @@ asset/material/solver/contact/equilibration schema; its generated compatibility
 trajectory is used only while building the shared Newton model and is never
 advanced by the interactive controller.
 
+## GPU performance path
+
+Both launchers use the same GPU stepper and safety monitor. Relative tet volume,
+non-finite/inverted tet counts, warning/stop counts, first affected tet, current
+and maximum contact-buffer use, and contact-buffer saturation are evaluated on
+the GPU every physics substep. Interactive candidates use separate accepted and
+candidate Newton state buffers; unsafe candidates are rejected on the GPU
+without replacing the accepted state.
+
+After settling, the repeated probe update, collision, VBD solve, safety
+reduction, and candidate accept/reject sequence is captured as a CUDA graph
+when `solver.cuda_graph` is enabled. Graph status and any capture error are
+recorded in `newton_environment.json`. The uncaptured fallback remains a
+GPU-only frame path and does not add per-substep host readbacks.
+
+Full particle/contact arrays are not downloaded in ordinary physics substeps or
+ordinary rendered frames. They are read only for scheduled UI metrics,
+scheduled exports, manual snapshots, or safety diagnostics. Estimated
+force/contact metrics are updated at `monitoring.ui_metrics_rate_hz` (10 Hz by
+default). The viewer picker is sampled once per rendered frame, and its small
+target transform is speed-limited and interpolated over substeps on the GPU.
+
+Output profiles are intentionally distinct:
+
+- `interactive_manual.json` uses snapshots only (`output.rate_hz: 0`);
+- `sphere_regression.json` and the visual examples export at 10 Hz;
+- `sphere_dataset_60hz.json` is the explicit full-rate dataset profile.
+
+Changing the export rate does not change the physics timestep or solver path.
+
+### RTX 4060 Ti benchmark
+
+The same legacy physics settings were measured before and after the GPU hot
+loop change on the local 16 GiB RTX 4060 Ti. The scripted comparison uses 60 Hz
+output on both sides:
+
+| Profile | Before (FPS) | After (FPS) | Speedup |
+| --- | ---: | ---: | ---: |
+| Interactive, free space | 2.64 | 22.11 | 8.37x |
+| Interactive, active contact | 2.39 | 21.93 | 9.18x |
+| Scripted sphere, headless, 60 Hz export | 2.92 | 9.78 | 3.35x |
+| Scripted sphere, GL viewer, 60 Hz export | 3.18 | 9.76 | 3.07x |
+
+This benchmark reports wall-clock simulated frames per second, including
+scheduled UI/export work. Re-run it on the active machine with:
+
+```powershell
+uv --native-tls run --project sim/newton --extra examples `
+  python sim/scripts/benchmark_mechanics_performance.py --profile all `
+  --sphere-config sim/config/mechanics/experiments/sphere_dataset_60hz.json
+```
+
 ## Record an MP4
 
 The `video` section is optional and disabled by default. To record through
@@ -193,6 +245,7 @@ Run the mechanics unit tests (including the invalid-STL fixture):
 uv --native-tls run --project sim/newton --with pytest --with trimesh `
   python -m pytest -o addopts= -q `
   tests/test_asset_validation.py tests/test_example_configs.py `
+  tests/test_gpu_monitoring.py tests/test_gpu_hot_loop.py `
   tests/test_indenter_orientation.py tests/test_surface_mapping.py `
   tests/test_press_hold_release.py tests/test_contact_detection.py `
   tests/test_repeatability.py tests/test_video_recording.py

@@ -31,6 +31,10 @@ EQUILIBRATION_DEFAULTS: dict[str, Any] = {
     "timeout_behavior": "warn",
 }
 
+MONITORING_DEFAULTS: dict[str, Any] = {
+    "ui_metrics_rate_hz": 10.0,
+}
+
 
 class ConfigError(ValueError):
     pass
@@ -494,7 +498,12 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
     resolved["solver"] = {
         "deterministic": False,
         "newton_strict": False,
+        "cuda_graph": True,
         **copy.deepcopy(experiment["solver"]),
+    }
+    resolved["monitoring"] = {
+        **MONITORING_DEFAULTS,
+        **copy.deepcopy(experiment["monitoring"]),
     }
     resolved["output"] = {
         "chunk_size_frames": 300,
@@ -659,6 +668,7 @@ def validate_run_config(config: dict[str, Any]) -> None:
             "maximum_rest_tet_condition_number",
             "minimum_relative_tet_volume",
             "tet_check_interval_substeps",
+            "ui_metrics_rate_hz",
         ),
         "monitoring",
     )
@@ -683,6 +693,7 @@ def validate_run_config(config: dict[str, Any]) -> None:
         "monitoring tet_check_interval_substeps",
         minimum=1,
     )
+    _positive(monitoring["ui_metrics_rate_hz"], "monitoring ui_metrics_rate_hz")
 
     solver = _mapping(config.get("solver"), "solver")
     _require(
@@ -695,6 +706,7 @@ def validate_run_config(config: dict[str, Any]) -> None:
             "particle_radius_edge_fraction",
             "deterministic",
             "newton_strict",
+            "cuda_graph",
             "particle_enable_self_contact",
             "particle_enable_tile_solve",
             "particle_collision_detection_interval",
@@ -713,6 +725,7 @@ def validate_run_config(config: dict[str, Any]) -> None:
     )
     _boolean(solver["deterministic"], "solver deterministic")
     _boolean(solver["newton_strict"], "solver newton_strict")
+    _boolean(solver["cuda_graph"], "solver cuda_graph")
     _boolean(
         solver["particle_enable_self_contact"], "solver particle_enable_self_contact"
     )
@@ -817,7 +830,7 @@ def validate_run_config(config: dict[str, Any]) -> None:
     output = _mapping(config.get("output"), "output")
     _require(output, ("directory", "rate_hz", "chunk_size_frames"), "output")
     _nonempty_string(output["directory"], "output directory")
-    output_hz = _positive(output["rate_hz"], "output rate_hz")
+    output_hz = _positive(output["rate_hz"], "output rate_hz", allow_zero=True)
     if output_hz > simulation_fps:
         raise ConfigError("output rate_hz cannot exceed simulation_fps")
     _integer(output["chunk_size_frames"], "output chunk_size_frames", minimum=1)

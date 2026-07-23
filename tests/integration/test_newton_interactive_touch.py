@@ -66,6 +66,7 @@ def test_real_interactive_controller_settles_moves_contacts_and_resets(tmp_path)
             if controller.equilibrated_particle_positions is not None:
                 break
         assert controller.equilibrated_particle_positions is not None
+        assert controller.gpu_stepper.graph_enabled
         initial_probe_position = controller.current_body_position.copy()
         initial_particles = controller.equilibrated_particle_positions.copy()
 

@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 
@@ -43,4 +45,37 @@ def test_two_real_newton_rollouts_agree_within_documented_tolerances(tmp_path):
         second["estimated_axial_reaction_n"],
         rtol=1.0e-3,
         atol=REACTION_ATOL_N,
+    )
+
+
+def test_output_rate_does_not_change_final_particle_state(tmp_path):
+    base_path = abbreviated_config(tmp_path, "output_rate_invariance")
+    base = json.loads(base_path.read_text(encoding="utf-8"))
+    low_rate = json.loads(json.dumps(base))
+    high_rate = json.loads(json.dumps(base))
+    low_rate["output"]["rate_hz"] = 10.0
+    high_rate["output"]["rate_hz"] = 60.0
+    low_path = tmp_path / "output_10hz.json"
+    high_path = tmp_path / "output_60hz.json"
+    low_path.write_text(json.dumps(low_rate, indent=2) + "\n", encoding="utf-8")
+    high_path.write_text(json.dumps(high_rate, indent=2) + "\n", encoding="utf-8")
+
+    low_frames, _ = run_rollout(low_path, tmp_path / "low_rate")
+    high_frames, _ = run_rollout(high_path, tmp_path / "high_rate")
+
+    np.testing.assert_allclose(
+        low_frames["tet_particle_positions_m"][-1],
+        high_frames["tet_particle_positions_m"][-1],
+        rtol=1.0e-5,
+        atol=POSITION_ATOL_M,
+    )
+    np.testing.assert_allclose(
+        low_frames["object_position_m"][-1],
+        high_frames["object_position_m"][-1],
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        low_frames["minimum_relative_tet_volume"][-1],
+        high_frames["minimum_relative_tet_volume"][-1],
+        atol=RELATIVE_VOLUME_ATOL,
     )

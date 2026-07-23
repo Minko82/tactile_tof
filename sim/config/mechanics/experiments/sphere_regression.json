@@ -74,12 +74,13 @@
     "minimum_rest_tet_quality": 0.01,
     "maximum_rest_tet_condition_number": 100.0,
     "minimum_relative_tet_volume": 0.15,
-    "tet_check_interval_substeps": 5
+    "tet_check_interval_substeps": 5,
+    "ui_metrics_rate_hz": 10.0
   },
   "output": {
     "directory": "../../../output/mechanics/sphere_regression",
     "chunk_size_frames": 300,
-    "rate_hz": 60.0
+    "rate_hz": 10.0
   },
   "video": {
     "enabled": false,

@@ -15,12 +15,13 @@ from newton._src.viewer.picking import Picking
 
 from .contact import contact_face_mask, masked_triangle_area
 from .exporter import export_failure_state
+from .gpu_monitoring import SAFETY_REASON_ESTIMATED_FORCE, SAFETY_REASON_NAMES
+from .gpu_stepper import InteractiveGpuCommandBuilder
 from .indenter import normalized_quaternion_xyzw, quaternion_rotate_xyzw
 from .interactive_safety import (
     CandidateSafety,
     ProbePose,
     commanded_indentation,
-    evaluate_candidate_safety,
 )
 from .mapping import reconstruct_surface
 from .newton_runner import TouchMechanicsControllerV2, _set_kinematic_pose_v2
@@ -240,6 +241,50 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
             np.zeros(3),
             np.zeros(3),
         )
+        self.gpu_stepper.initialize_last_safe_pose(
+            np.concatenate(
+                [self.probe_initial_position, self.probe_initial_quaternion]
+            ),
+            np.zeros(6, dtype=np.float32),
+            self.current_commanded_indentation_m,
+        )
+        self.gpu_command_builder = InteractiveGpuCommandBuilder(
+            stepper=self.gpu_stepper,
+            probe=self.config["probe"],
+            mesh_vertices_m=self.probe_local_vertices_m,
+            contact_location_m=self.contact_reference_location_m,
+            loading_direction=self.loading_direction,
+            frame_dt=self.frame_dt,
+            free_speed_m_s=float(
+                self.manual_config["free_space_linear_speed_m_s"]
+            ),
+            near_speed_m_s=float(
+                self.manual_config["near_contact_linear_speed_m_s"]
+            ),
+            contact_speed_m_s=float(
+                self.manual_config["contact_linear_speed_m_s"]
+            ),
+            near_contact_distance_m=float(
+                self.manual_config["near_contact_distance_m"]
+            ),
+            max_angular_speed_deg_s=float(
+                self.manual_config["max_angular_speed_deg_s"]
+            ),
+            max_translation_per_frame_m=float(
+                self.manual_config["max_translation_per_frame_m"]
+            ),
+            max_rotation_per_frame_deg=float(
+                self.manual_config["max_rotation_per_frame_deg"]
+            ),
+        )
+        self.gpu_command_builder.update_target(
+            np.concatenate(
+                [self.probe_initial_position, self.probe_initial_quaternion]
+            ),
+            self.current_commanded_indentation_m,
+        )
+        self.gpu_stepper.command_builder = self.gpu_command_builder.build
+        self.last_gpu_safety_generation = 0
 
         color = tuple(float(component) for component in probe["color_rgb"])
         if self.probe_shape < 0:
@@ -250,6 +295,8 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
 
         self.lifecycle_phase = "initialization"
         self.rotation_input_pending = False
+        self.cached_picker_state = None
+        self.picker_probe_selected = False
         self.pending_reset = False
         self.pending_baseline = False
         self.pending_capture = False
@@ -437,14 +484,19 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
         if self.viewer is None:
             return
         picking = getattr(self.viewer, "picking", None)
-        if (
-            picking is None
-            or not picking.is_picking()
-            or int(picking.pick_body.numpy()[0]) != self.indenter_body
-        ):
+        if picking is None or not picking.is_picking():
+            self.cached_picker_state = None
+            self.picker_probe_selected = False
+            self.rotation_input_pending = False
+            return
+        selected_body = int(picking.pick_body.numpy()[0])
+        self.picker_probe_selected = selected_body == self.indenter_body
+        if not self.picker_probe_selected:
+            self.cached_picker_state = None
             self.rotation_input_pending = False
             return
         state = picking.pick_state.numpy()
+        self.cached_picker_state = state
         if not self.rotation_input_pending:
             local_point = np.asarray(state[0]["picked_point_local"], dtype=np.float64)
             target_point = np.asarray(
@@ -466,10 +518,11 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
         if (
             picking is None
             or not picking.is_picking()
-            or int(picking.pick_body.numpy()[0]) != self.indenter_body
+            or not self.picker_probe_selected
+            or self.cached_picker_state is None
         ):
             return
-        state = picking.pick_state.numpy()
+        state = self.cached_picker_state
         local_point = np.asarray(state[0]["picked_point_local"], dtype=np.float64)
         picked_world = self.current_body_position + quaternion_rotate_xyzw(
             self.indenter_quaternion, local_point
@@ -494,7 +547,7 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
         if (
             picking is None
             or not picking.is_picking()
-            or int(picking.pick_body.numpy()[0]) != self.indenter_body
+            or not self.picker_probe_selected
         ):
             return
         try:
@@ -522,9 +575,6 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
             target_quaternion,
         )
         self.rotation_input_pending = True
-        pick_state = picking.pick_state.numpy()
-        pick_state[0]["picking_target_world"] = pick_state[0]["picked_point_world"]
-        picking.pick_state.assign(pick_state)
 
     def _key_matches(self, symbol: int, configured: str) -> bool:
         try:
@@ -541,43 +591,6 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
             self.pending_baseline = True
         elif self._key_matches(symbol, self.manual_config["capture_key"]):
             self.pending_capture = True
-
-    def _evaluate_candidate_state(
-        self, pose: ProbePose
-    ) -> tuple[CandidateSafety, Any, np.ndarray, np.ndarray]:
-        candidate_global = self.state_1.particle_q.numpy().astype(np.float64)
-        previous_global = self.state_0.particle_q.numpy().astype(np.float64)
-        particles = candidate_global[self.particle_start : self.particle_end]
-        relative = self._relative_tet_volumes(particles)
-        contact = self._contact_summary(candidate_global, previous_global)
-        force_magnitude = float(np.linalg.norm(contact.estimated_world_reaction_n))
-        indentation = self._commanded_indentation_for_pose(pose)
-        evaluation = evaluate_candidate_safety(
-            relative_j=relative,
-            estimated_force_magnitude_n=force_magnitude,
-            commanded_indentation_m=indentation,
-            circuit_breaker_minimum_j=float(
-                self.config["monitoring"]["minimum_relative_tet_volume"]
-            ),
-            stop_minimum_j=float(
-                self.safety_config["stop_minimum_relative_tet_volume"]
-            ),
-            warning_minimum_j=float(
-                self.safety_config["warning_minimum_relative_tet_volume"]
-            ),
-            stop_estimated_force_n=float(self.safety_config["stop_estimated_force_n"]),
-            warning_estimated_force_n=float(
-                self.safety_config["warning_estimated_force_n"]
-            ),
-            maximum_commanded_indentation_m=self.maximum_commanded_indentation_m,
-            warning_commanded_indentation_m=float(
-                self.safety_config["warning_commanded_indentation_m"]
-            ),
-        )
-        self.minimum_relative_j_seen = min(
-            self.minimum_relative_j_seen, evaluation.minimum_relative_j
-        )
-        return evaluation, contact, particles, relative
 
     def _export_safety_event(
         self,
@@ -669,158 +682,114 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
                 device=device,
             )
 
-    def _fatal_candidate(
-        self,
-        evaluation: CandidateSafety,
-        particles: np.ndarray,
-        relative: np.ndarray,
-        candidate_pose: ProbePose,
-    ) -> None:
-        reason = evaluation.fatal_reason or "fatal_interactive_safety_error"
-        self._export_safety_event(
-            self.failure_path,
-            event_type="fatal_circuit_breaker",
-            reason=reason,
-            evaluation=evaluation,
-            particles=particles,
-            relative=relative,
-            candidate_pose=candidate_pose,
+    def _handle_gpu_safety_event(self, snapshot, control) -> None:
+        candidate_global, probe_transform, indentation = (
+            self.gpu_stepper.rejected_state_readback()
         )
-        self.fatal_error_message = (
-            f"{reason}: minimum relative tet volume {evaluation.minimum_relative_j:.6f}"
+        particles = candidate_global[self.particle_start : self.particle_end].astype(
+            np.float64
         )
-        self.finalize()
-        raise FloatingPointError(
-            f"{self.fatal_error_message}; state saved to {self.failure_path}"
+        relative = self._relative_tet_volumes(particles)
+        minimum_j = float(np.nanmin(relative))
+        reason = SAFETY_REASON_NAMES.get(
+            control.safety_reason_code,
+            "interactive_safety_stop",
         )
-
-    def _reject_candidate(
-        self,
-        evaluation: CandidateSafety,
-        particles: np.ndarray,
-        relative: np.ndarray,
-        candidate_pose: ProbePose,
-    ) -> None:
-        reason = evaluation.stop_reason or "interactive_safety_stop"
+        fatal = bool(
+            snapshot.fatal
+            or np.any(
+                ~np.isfinite(relative)
+                | (
+                    relative
+                    < float(
+                        self.config["monitoring"]["minimum_relative_tet_volume"]
+                    )
+                )
+            )
+        )
+        affected_threshold = float(
+            self.config["monitoring"]["minimum_relative_tet_volume"]
+            if fatal
+            else self.safety_config["stop_minimum_relative_tet_volume"]
+        )
+        affected = np.flatnonzero(
+            ~np.isfinite(relative) | (relative < affected_threshold)
+        ).astype(np.int32)
+        if not len(affected):
+            affected = np.asarray([int(np.nanargmin(relative))], dtype=np.int32)
+        force_magnitude = float(
+            self.live_metrics.get("estimated_force_magnitude_n", 0.0)
+        )
+        warnings: list[str] = []
+        if minimum_j < float(
+            self.safety_config["warning_minimum_relative_tet_volume"]
+        ):
+            warnings.append("minimum_relative_tet_volume")
+        if indentation > float(
+            self.safety_config["warning_commanded_indentation_m"]
+        ):
+            warnings.append("commanded_indentation")
+        transform = np.asarray(probe_transform[0], dtype=np.float64)
+        candidate_pose = ProbePose(transform[:3], transform[3:7])
+        evaluation = CandidateSafety(
+            fatal_reason="tet_volume_circuit_breaker" if fatal else None,
+            stop_reason=None if fatal else reason,
+            warning_reasons=tuple(warnings),
+            minimum_relative_j=minimum_j,
+            affected_tet_indices=affected,
+            estimated_force_magnitude_n=force_magnitude,
+            commanded_indentation_m=indentation,
+        )
         destination = (
-            self.exporter.output_dir
+            self.failure_path
+            if fatal
+            else self.exporter.output_dir
             / f"safety_stop_{self.safety_snapshot_index:05d}.npz"
         )
         self._export_safety_event(
             destination,
-            event_type="recoverable_safety_stop",
+            event_type=(
+                "fatal_circuit_breaker"
+                if fatal
+                else "recoverable_safety_stop"
+            ),
             reason=reason,
             evaluation=evaluation,
             particles=particles,
             relative=relative,
             candidate_pose=candidate_pose,
         )
+        self.last_safety_export_path = destination
+        self.safety_affected_tet_indices = affected
+        self.last_safety_evaluation = evaluation
+        self._update_safety_visualization(affected)
+        if fatal:
+            self.fatal_error_message = (
+                f"{reason}: minimum relative tet volume {minimum_j:.6f}"
+            )
+            self.finalize()
+            raise FloatingPointError(
+                f"{self.fatal_error_message}; state saved to {destination}"
+            )
+
         self.safety_snapshot_index += 1
         self.safety_stop_count += 1
-        self.last_safety_export_path = destination
-        self.safety_stop_active = True
-        self.safety_stop_reason = reason
-        self.safety_stop_indentation_m = evaluation.commanded_indentation_m
-        self.safety_warning_reasons = evaluation.warning_reasons
-        self.safety_affected_tet_indices = evaluation.affected_tet_indices.copy()
-        self.last_safety_evaluation = evaluation
         self.mouse_target_pose = self.last_safe_probe_pose.copy()
-
-        self.current_body_position = self.last_safe_probe_pose.position_m.copy()
-        self.indenter_quaternion = self.last_safe_probe_pose.quaternion_xyzw.copy()
-        self.current_body_velocity = np.zeros(3, dtype=np.float64)
-        self.current_body_angular_velocity = np.zeros(3, dtype=np.float64)
-        self.current_commanded_indentation_m = self._commanded_indentation_for_pose(
-            self.last_safe_probe_pose
-        )
-        self._set_probe_pose(
-            self.state_0,
-            self.current_body_position,
-            self.indenter_quaternion,
-            self.current_body_velocity,
-            self.current_body_angular_velocity,
-        )
-        self.state_1.assign(self.state_0)
-        self.collision_pipeline.collide(self.state_0, self.contacts)
         self._sync_picker_point(reset_target=True)
-        self._update_safety_visualization(self.safety_affected_tet_indices)
         self.environment["manual_safety"]["last_stop"] = {
             "reason": reason,
-            "minimum_relative_j": evaluation.minimum_relative_j,
-            "commanded_indentation_m": evaluation.commanded_indentation_m,
-            "affected_tet_indices": evaluation.affected_tet_indices.tolist(),
+            "minimum_relative_j": minimum_j,
+            "commanded_indentation_m": indentation,
+            "affected_tet_indices": affected.tolist(),
             "file": str(destination),
         }
         self._write_environment()
         print(
             "[interactive][SAFETY STOP] "
-            f"reason={reason} minJ={evaluation.minimum_relative_j:.4f} "
-            f"command={evaluation.commanded_indentation_m * 1000.0:.3f} mm; "
+            f"reason={reason} minJ={minimum_j:.4f} "
+            f"command={indentation * 1000.0:.3f} mm; "
             "retract the probe or press R"
         )
-
-    def _accept_candidate(
-        self,
-        evaluation: CandidateSafety,
-        contact: Any,
-        candidate_pose: ProbePose,
-        linear_velocity_m_s: np.ndarray,
-        angular_velocity_rad_s: np.ndarray,
-    ) -> None:
-        previous_warnings = self.safety_warning_reasons
-        self.state_0, self.state_1 = self.state_1, self.state_0
-        self.current_body_position = candidate_pose.position_m.copy()
-        self.indenter_quaternion = candidate_pose.quaternion_xyzw.copy()
-        self.current_body_velocity = np.asarray(
-            linear_velocity_m_s, dtype=np.float64
-        ).copy()
-        self.current_body_angular_velocity = np.asarray(
-            angular_velocity_rad_s, dtype=np.float64
-        ).copy()
-        self.current_commanded_indentation_m = evaluation.commanded_indentation_m
-        self.last_safe_probe_pose = candidate_pose.copy()
-        self.last_contact_flag = bool(contact.contact_flag)
-        self.last_safety_evaluation = evaluation
-        self.safety_warning_reasons = evaluation.warning_reasons
-        self._monitor_contact_buffer()
-
-        if self.safety_stop_active:
-            retraction = (
-                self.safety_stop_indentation_m - self.current_commanded_indentation_m
-            )
-            recovered_j = evaluation.minimum_relative_j >= float(
-                self.safety_config["stop_minimum_relative_tet_volume"]
-            )
-            if (
-                retraction >= float(self.safety_config["retraction_clearance_m"])
-                and recovered_j
-            ):
-                self.safety_stop_active = False
-                self.safety_stop_reason = ""
-                print("[interactive] safety stop cleared; inward motion re-enabled")
-
-        if self.safety_stop_active:
-            affected = self.safety_affected_tet_indices
-        elif evaluation.warning_reasons:
-            affected = evaluation.affected_tet_indices
-            self.safety_affected_tet_indices = affected.copy()
-            if evaluation.warning_reasons != previous_warnings:
-                self._update_safety_visualization(affected)
-        elif previous_warnings:
-            self.safety_affected_tet_indices = np.empty(0, dtype=np.int32)
-            self._update_safety_visualization(self.safety_affected_tet_indices)
-
-        if (
-            evaluation.warning_reasons
-            and evaluation.warning_reasons != previous_warnings
-        ):
-            print(
-                "[interactive][SAFETY WARNING] "
-                f"reasons={','.join(evaluation.warning_reasons)} "
-                f"minJ={evaluation.minimum_relative_j:.4f} "
-                f"command={evaluation.commanded_indentation_m * 1000.0:.3f} mm "
-                f"|F_est|={evaluation.estimated_force_magnitude_n:.4f} N"
-            )
 
     def simulate(self, *, advance_trajectory: bool) -> None:
         del advance_trajectory
@@ -835,100 +804,71 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
                 target_pose = self.mouse_target_pose
                 self._sync_picker_point(reset_target=True)
 
-        limited = limited_transform_step(
-            current_position_m=self.current_body_position,
-            current_quaternion_xyzw=self.indenter_quaternion,
-            target_position_m=target_pose.position_m,
-            target_quaternion_xyzw=target_pose.quaternion_xyzw,
-            dt_s=self.frame_dt,
-            max_linear_speed_m_s=self._select_linear_speed(),
-            max_angular_speed_deg_s=float(
-                self.manual_config["max_angular_speed_deg_s"]
+        target_indentation = self._commanded_indentation_for_pose(target_pose)
+        self.gpu_command_builder.update_target(
+            np.concatenate(
+                [target_pose.position_m, target_pose.quaternion_xyzw]
             ),
-            max_translation_per_frame_m=float(
-                self.manual_config["max_translation_per_frame_m"]
-            ),
-            max_rotation_per_frame_deg=float(
-                self.manual_config["max_rotation_per_frame_deg"]
-            ),
+            target_indentation,
         )
-        start_position = self.current_body_position.copy()
-        start_quaternion = self.indenter_quaternion.copy()
-        total_rotation = _quaternion_delta_xyzw(
-            start_quaternion, limited.quaternion_xyzw
-        )[1]
-        movement_rejected = False
-        for substep_index in range(self.sim_substeps):
-            if movement_rejected:
-                candidate_pose = self.last_safe_probe_pose.copy()
-                linear_velocity = np.zeros(3, dtype=np.float64)
-                angular_velocity = np.zeros(3, dtype=np.float64)
-            else:
-                alpha = (substep_index + 1) / self.sim_substeps
-                position = start_position + alpha * (
-                    limited.position_m - start_position
-                )
-                incremental = limited_transform_step(
-                    current_position_m=start_position,
-                    current_quaternion_xyzw=start_quaternion,
-                    target_position_m=limited.position_m,
-                    target_quaternion_xyzw=limited.quaternion_xyzw,
-                    dt_s=1.0,
-                    max_linear_speed_m_s=1.0e9,
-                    max_angular_speed_deg_s=1.0e9,
-                    max_translation_per_frame_m=1.0e9,
-                    max_rotation_per_frame_deg=math.degrees(alpha * total_rotation),
-                )
-                candidate_pose = ProbePose(
-                    position,
-                    incremental.quaternion_xyzw,
-                )
-                linear_velocity = limited.linear_velocity_m_s
-                angular_velocity = limited.angular_velocity_rad_s
+        snapshot = self.gpu_stepper.run_frame(include_free_speed=False)
+        self.substep += self.sim_substeps
+        self._apply_gpu_safety_snapshot(snapshot)
+        control = self.gpu_stepper.control_readback()
+        transform, velocity = self.gpu_stepper.accepted_pose_readback()
+        self.current_body_position = np.asarray(transform[:3], dtype=np.float64)
+        self.indenter_quaternion = normalized_quaternion_xyzw(transform[3:7])
+        self.current_body_velocity = np.asarray(velocity[:3], dtype=np.float64)
+        self.current_body_angular_velocity = np.asarray(
+            velocity[3:6], dtype=np.float64
+        )
+        self.current_commanded_indentation_m = (
+            control.current_commanded_indentation_m
+        )
+        self.last_safe_probe_pose = ProbePose(
+            self.current_body_position,
+            self.indenter_quaternion,
+        )
+        self.last_contact_flag = snapshot.contact_count > 0
+        if self.last_contact_flag:
+            self.speed_regime = "contact"
+        elif self.current_commanded_indentation_m >= -float(
+            self.manual_config["near_contact_distance_m"]
+        ):
+            self.speed_regime = "near_contact"
+        else:
+            self.speed_regime = "free_space"
+        self.minimum_relative_j_seen = min(
+            self.minimum_relative_j_seen,
+            snapshot.minimum_relative_j,
+        )
 
-            self.state_0.clear_forces()
-            self.state_1.clear_forces()
-            self._set_probe_pose(
-                self.state_0,
-                candidate_pose.position_m,
-                candidate_pose.quaternion_xyzw,
-                linear_velocity,
-                angular_velocity,
-            )
-            self.collision_pipeline.collide(self.state_0, self.contacts)
-            self.solver.step(
-                self.state_0,
-                self.state_1,
-                self.control,
-                self.contacts,
-                self.sim_dt,
-            )
-            self.substep += 1
-            evaluation, contact, particles, relative = self._evaluate_candidate_state(
-                candidate_pose
-            )
-            if evaluation.fatal:
-                self._fatal_candidate(
-                    evaluation,
-                    particles,
-                    relative,
-                    candidate_pose,
-                )
-            if evaluation.stopped:
-                self._reject_candidate(
-                    evaluation,
-                    particles,
-                    relative,
-                    candidate_pose,
-                )
-                movement_rejected = True
-                continue
-            self._accept_candidate(
-                evaluation,
-                contact,
-                candidate_pose,
-                linear_velocity,
-                angular_velocity,
+        previous_stop = self.safety_stop_active
+        self.safety_stop_active = control.safety_stop_active
+        self.safety_stop_reason = SAFETY_REASON_NAMES.get(
+            control.safety_reason_code, ""
+        )
+        self.safety_stop_indentation_m = control.stop_commanded_indentation_m
+        if control.safety_generation > self.last_gpu_safety_generation:
+            self.last_gpu_safety_generation = control.safety_generation
+            self._handle_gpu_safety_event(snapshot, control)
+        elif previous_stop and not self.safety_stop_active:
+            self.safety_stop_reason = ""
+            print("[interactive] safety stop cleared; inward motion re-enabled")
+
+        warning_reasons: list[str] = []
+        if snapshot.minimum_relative_j < float(
+            self.safety_config["warning_minimum_relative_tet_volume"]
+        ):
+            warning_reasons.append("minimum_relative_tet_volume")
+        if self.current_commanded_indentation_m > float(
+            self.safety_config["warning_commanded_indentation_m"]
+        ):
+            warning_reasons.append("commanded_indentation")
+        self.safety_warning_reasons = tuple(warning_reasons)
+        if snapshot.first_affected_tet_id >= 0 and warning_reasons:
+            self.safety_affected_tet_indices = np.asarray(
+                [snapshot.first_affected_tet_id], dtype=np.int32
             )
         self._sync_picker_point()
 
@@ -940,35 +880,6 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
         }:
             return self.lifecycle_phase
         return "interactive_manual"
-
-    def _check_tet_state(self) -> None:
-        particles = self._particle_positions()
-        relative = self._relative_tet_volumes(particles)
-        threshold = float(self.config["monitoring"]["minimum_relative_tet_volume"])
-        bad = np.flatnonzero(~np.isfinite(relative) | (relative < threshold))
-        if not len(bad):
-            return
-        export_failure_state(
-            self.failure_path,
-            particle_q=particles,
-            current_tet_volumes=relative * self.rest_volumes,
-            rest_tet_volumes=self.rest_volumes,
-            relative_j=relative,
-            bad_tet_indices=bad,
-            relative_j_threshold=np.float64(threshold),
-            substep=np.int64(self.substep),
-            sim_time_s=np.float64(self.sim_time),
-            trajectory_phase=np.asarray("interactive_manual"),
-            probe_position_m=self.current_body_position,
-            probe_quaternion_xyzw=self.indenter_quaternion,
-            newton_version=np.asarray(self.newton_version),
-            newton_git_sha=np.asarray(self.newton_revision),
-        )
-        self.finalize()
-        raise FloatingPointError(
-            f"relative tet volume crossed {threshold:g}; "
-            f"state saved to {self.failure_path}"
-        )
 
     def _capture_equilibrated_baseline(self) -> None:
         super()._capture_equilibrated_baseline()
@@ -1016,6 +927,19 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
             self.current_body_velocity,
             self.current_body_angular_velocity,
         )
+        self.gpu_stepper.reset_transaction(
+            np.concatenate(
+                [self.current_body_position, self.indenter_quaternion]
+            ),
+            np.concatenate(
+                [
+                    self.current_body_velocity,
+                    self.current_body_angular_velocity,
+                ]
+            ),
+            self.current_commanded_indentation_m,
+        )
+        self.last_gpu_safety_generation = 0
         if self.viewer is not None and getattr(self.viewer, "picking", None):
             self.viewer.picking.release()
         self.current_contact_buffer_count = 0
@@ -1040,7 +964,9 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
         self,
     ) -> tuple[Any, np.ndarray, np.ndarray, float, np.ndarray, np.ndarray]:
         current_global = self.state_0.particle_q.numpy().astype(np.float64)
-        previous_global = self.state_1.particle_q.numpy().astype(np.float64)
+        previous_global = (
+            self.gpu_stepper.previous_particle_q_device.numpy().astype(np.float64)
+        )
         particles = current_global[self.particle_start : self.particle_end]
         deformed_surface = reconstruct_surface(
             particles, self.mapping_tets, self.surface_mapping
@@ -1076,12 +1002,73 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
             particles[active_local],
         )
 
+    def _apply_scheduled_force_safety(
+        self,
+        *,
+        force_magnitude_n: float,
+        particles: np.ndarray,
+        relative_j: np.ndarray,
+    ) -> None:
+        warning_limit = float(self.safety_config["warning_estimated_force_n"])
+        stop_limit = float(self.safety_config["stop_estimated_force_n"])
+        warnings = list(self.safety_warning_reasons)
+        if force_magnitude_n > warning_limit and "estimated_force" not in warnings:
+            warnings.append("estimated_force")
+        self.safety_warning_reasons = tuple(warnings)
+        if force_magnitude_n <= stop_limit or self.safety_stop_active:
+            return
+        if not self.gpu_stepper.set_host_recoverable_latch(
+            reason_code=SAFETY_REASON_ESTIMATED_FORCE,
+            commanded_indentation_m=self.current_commanded_indentation_m,
+        ):
+            return
+
+        affected = np.asarray([int(np.nanargmin(relative_j))], dtype=np.int32)
+        evaluation = CandidateSafety(
+            fatal_reason=None,
+            stop_reason="estimated_force_limit",
+            warning_reasons=tuple(warnings),
+            minimum_relative_j=float(np.nanmin(relative_j)),
+            affected_tet_indices=affected,
+            estimated_force_magnitude_n=force_magnitude_n,
+            commanded_indentation_m=self.current_commanded_indentation_m,
+        )
+        destination = (
+            self.exporter.output_dir
+            / f"safety_stop_{self.safety_snapshot_index:05d}.npz"
+        )
+        self._export_safety_event(
+            destination,
+            event_type="recoverable_safety_stop",
+            reason="estimated_force_limit",
+            evaluation=evaluation,
+            particles=particles,
+            relative=relative_j,
+            candidate_pose=self.last_safe_probe_pose,
+        )
+        self.safety_snapshot_index += 1
+        self.safety_stop_count += 1
+        self.last_safety_export_path = destination
+        self.safety_stop_active = True
+        self.safety_stop_reason = "estimated_force_limit"
+        self.safety_stop_indentation_m = self.current_commanded_indentation_m
+        self.safety_affected_tet_indices = affected
+        self.last_safety_evaluation = evaluation
+        self.mouse_target_pose = self.last_safe_probe_pose.copy()
+        self._sync_picker_point(reset_target=True)
+        self._update_safety_visualization(affected)
+        print(
+            "[interactive][SAFETY STOP] "
+            f"reason=estimated_force_limit |F_est|={force_magnitude_n:.4f} N; "
+            "retract the probe or press R"
+        )
+
     def _update_live_metrics(self, *, force: bool = False) -> None:
         if self.equilibrated_particle_positions is None:
             return
         if not force and self.sim_time + 1.0e-12 < self.next_metrics_time_s:
             return
-        period = 1.0 / float(self.display_config["metrics_rate_hz"])
+        period = 1.0 / float(self.config["monitoring"]["ui_metrics_rate_hz"])
         self.next_metrics_time_s = self.sim_time + period
         (
             contact,
@@ -1097,6 +1084,11 @@ class InteractiveTouchController(TouchMechanicsControllerV2):
         minimum_relative = float(np.nanmin(relative))
         world_force = np.asarray(contact.estimated_world_reaction_n, dtype=np.float64)
         force_magnitude = float(np.linalg.norm(world_force))
+        self._apply_scheduled_force_safety(
+            force_magnitude_n=force_magnitude,
+            particles=particles,
+            relative_j=relative,
+        )
         orientation_wxyz = np.asarray(
             [
                 self.indenter_quaternion[3],
