@@ -129,9 +129,273 @@ def _resolve_path(base: Path, value: Any, context: str) -> str:
     return str(candidate.resolve())
 
 
+def _prepare_interactive_compatibility(
+    experiment: dict[str, Any],
+) -> dict[str, Any]:
+    """Add internal prescribed-schema fields for the manual controller build path.
+
+    The interactive controller reuses the exact validated asset/material/VBD
+    construction in ``TouchMechanicsControllerV2`` but never advances its
+    trajectory state machine. The probe section remains the user-facing source
+    of truth; these generated fields only place the kinematic body at its
+    configured initial pose while the shared model is built.
+    """
+
+    if experiment.get("mode") != "interactive_manual":
+        return experiment
+    prepared = copy.deepcopy(experiment)
+    probe = _mapping(prepared.get("probe"), "interactive probe")
+    contact = _mapping(prepared.get("contact"), "interactive contact")
+    _require(
+        probe,
+        ("initial_position_m", "initial_orientation_wxyz"),
+        "interactive probe",
+    )
+    _require(contact, ("location_m", "direction"), "interactive contact")
+    position = _finite_vector(
+        probe["initial_position_m"], 3, "probe initial_position_m"
+    )
+    orientation_wxyz = _finite_vector(
+        probe["initial_orientation_wxyz"],
+        4,
+        "probe initial_orientation_wxyz",
+        nonzero=True,
+    )
+    direction = _finite_vector(
+        contact["direction"], 3, "interactive contact direction", nonzero=True
+    )
+    direction_norm = math.sqrt(sum(component * component for component in direction))
+    direction = [component / direction_norm for component in direction]
+
+    compatibility_radius_m = 0.001
+    compatibility_clearance_m = 0.01
+    prepared["contact"] = copy.deepcopy(contact)
+    prepared["contact"]["manual_reference_location_m"] = copy.deepcopy(
+        contact["location_m"]
+    )
+    prepared["contact"]["location_m"] = [
+        position[index]
+        + direction[index] * (compatibility_radius_m + compatibility_clearance_m)
+        for index in range(3)
+    ]
+    prepared["indenter"] = {
+        "type": "sphere",
+        "radius_m": compatibility_radius_m,
+        "quaternion_xyzw": [
+            orientation_wxyz[1],
+            orientation_wxyz[2],
+            orientation_wxyz[3],
+            orientation_wxyz[0],
+        ],
+    }
+    prepared["trajectory"] = {
+        "clearance_m": compatibility_clearance_m,
+        "indentation_m": 1.0e-6,
+        "easing": "linear",
+        "post_recovery_s": 0.0,
+        "durations_s": {
+            "approach": 1.0,
+            "press": 1.0,
+            "hold": 0.0,
+            "release": 1.0,
+            "recovery": 0.0,
+        },
+        "lateral_slip": {
+            "enabled": False,
+            "duration_s": 1.0,
+            "distance_m": 0.0,
+            "direction": [1.0, 0.0, 0.0],
+        },
+    }
+    prepared["_interactive_compatibility_generated"] = True
+    return prepared
+
+
+def _validate_interactive_config(config: dict[str, Any]) -> None:
+    if config.get("mode") != "interactive_manual":
+        return
+    probe = _mapping(config.get("probe"), "interactive probe")
+    manual = _mapping(config.get("manual_control"), "manual_control")
+    safety = _mapping(manual.get("safety"), "manual_control safety")
+    display = _mapping(config.get("display"), "interactive display")
+    _require(
+        probe,
+        (
+            "type",
+            "initial_position_m",
+            "initial_orientation_wxyz",
+            "color_rgb",
+        ),
+        "interactive probe",
+    )
+    probe_type = _nonempty_string(probe["type"], "interactive probe type")
+    supported_probe_types = {
+        "rounded_block",
+        "capsule",
+        "cylinder",
+        "sphere",
+        "custom_rigid_stl",
+    }
+    if probe_type not in supported_probe_types:
+        raise ConfigError(
+            f"interactive probe type must be one of {sorted(supported_probe_types)}"
+        )
+    _finite_vector(probe["initial_position_m"], 3, "probe initial_position_m")
+    _finite_vector(
+        probe["initial_orientation_wxyz"],
+        4,
+        "probe initial_orientation_wxyz",
+        nonzero=True,
+    )
+    color = _finite_vector(probe["color_rgb"], 3, "probe color_rgb")
+    if any(component < 0.0 or component > 1.0 for component in color):
+        raise ConfigError("probe color_rgb values must be in [0, 1]")
+    if probe_type in {"rounded_block", "custom_rigid_stl"}:
+        _require(probe, ("mesh", "scale_to_m"), "mesh probe")
+        _nonempty_string(probe["mesh"], "probe mesh")
+        _positive(probe["scale_to_m"], "probe scale_to_m")
+    if probe_type == "rounded_block":
+        _require(probe, ("dimensions_m",), "rounded block probe")
+        dimensions = _finite_vector(probe["dimensions_m"], 3, "probe dimensions_m")
+        if any(dimension <= 0.0 for dimension in dimensions):
+            raise ConfigError("probe dimensions_m values must be positive")
+    elif probe_type == "sphere":
+        _require(probe, ("radius_m",), "sphere probe")
+        _positive(probe["radius_m"], "probe radius_m")
+    elif probe_type in {"capsule", "cylinder"}:
+        _require(probe, ("radius_m", "height_m"), f"{probe_type} probe")
+        _positive(probe["radius_m"], "probe radius_m")
+        _positive(probe["height_m"], "probe height_m")
+
+    _require(
+        manual,
+        (
+            "max_linear_speed_m_s",
+            "free_space_linear_speed_m_s",
+            "near_contact_linear_speed_m_s",
+            "contact_linear_speed_m_s",
+            "near_contact_distance_m",
+            "max_angular_speed_deg_s",
+            "max_translation_per_frame_m",
+            "max_rotation_per_frame_deg",
+            "rotation_sensitivity_deg_per_pixel",
+            "reset_key",
+            "baseline_key",
+            "capture_key",
+        ),
+        "manual_control",
+    )
+    for field in (
+        "max_linear_speed_m_s",
+        "free_space_linear_speed_m_s",
+        "near_contact_linear_speed_m_s",
+        "contact_linear_speed_m_s",
+        "near_contact_distance_m",
+        "max_angular_speed_deg_s",
+        "max_translation_per_frame_m",
+        "max_rotation_per_frame_deg",
+        "rotation_sensitivity_deg_per_pixel",
+    ):
+        _positive(manual[field], f"manual_control {field}")
+
+    contact_speed = float(manual["contact_linear_speed_m_s"])
+    near_speed = float(manual["near_contact_linear_speed_m_s"])
+    free_speed = float(manual["free_space_linear_speed_m_s"])
+    maximum_speed = float(manual["max_linear_speed_m_s"])
+    if not 0.0 < contact_speed <= near_speed <= free_speed <= maximum_speed:
+        raise ConfigError(
+            "manual contact speeds must satisfy 0 < contact <= near <= free <= max"
+        )
+
+    _require(
+        safety,
+        (
+            "warning_minimum_relative_tet_volume",
+            "stop_minimum_relative_tet_volume",
+            "warning_estimated_force_n",
+            "stop_estimated_force_n",
+            "warning_commanded_indentation_m",
+            "retraction_clearance_m",
+        ),
+        "manual_control safety",
+    )
+    warning_j = _positive(
+        safety["warning_minimum_relative_tet_volume"],
+        "safety warning_minimum_relative_tet_volume",
+    )
+    stop_j = _positive(
+        safety["stop_minimum_relative_tet_volume"],
+        "safety stop_minimum_relative_tet_volume",
+    )
+    circuit_j = float(config["monitoring"]["minimum_relative_tet_volume"])
+    if not circuit_j < stop_j < warning_j <= 1.0:
+        raise ConfigError(
+            "tet safety thresholds must satisfy circuit_breaker < stop < warning <= 1"
+        )
+    warning_force = _positive(
+        safety["warning_estimated_force_n"],
+        "safety warning_estimated_force_n",
+    )
+    stop_force = _positive(
+        safety["stop_estimated_force_n"],
+        "safety stop_estimated_force_n",
+    )
+    if warning_force >= stop_force:
+        raise ConfigError("safety warning_estimated_force_n must be below stop")
+
+    asset = _mapping(config.get("asset"), "asset config")
+    asset_safety = _mapping(asset.get("interactive_safety"), "asset interactive_safety")
+    _require(
+        asset_safety,
+        ("maximum_commanded_indentation_m",),
+        "asset interactive_safety",
+    )
+    maximum_indentation = _positive(
+        asset_safety["maximum_commanded_indentation_m"],
+        "asset maximum_commanded_indentation_m",
+    )
+    warning_indentation = _positive(
+        safety["warning_commanded_indentation_m"],
+        "safety warning_commanded_indentation_m",
+    )
+    if warning_indentation >= maximum_indentation:
+        raise ConfigError("commanded-indentation warning must be below asset maximum")
+    _positive(safety["retraction_clearance_m"], "safety retraction_clearance_m")
+
+    for field in ("reset_key", "baseline_key", "capture_key"):
+        _nonempty_string(manual[field], f"manual_control {field}")
+
+    _require(
+        display,
+        (
+            "show_contacts",
+            "show_metrics",
+            "displacement_heatmap",
+            "show_safety_tets",
+            "show_mount_vertices",
+            "metrics_rate_hz",
+            "heatmap_max_displacement_m",
+        ),
+        "interactive display",
+    )
+    for field in (
+        "show_contacts",
+        "show_metrics",
+        "displacement_heatmap",
+        "show_safety_tets",
+        "show_mount_vertices",
+    ):
+        _boolean(display[field], f"interactive display {field}")
+    _positive(display["metrics_rate_hz"], "interactive display metrics_rate_hz")
+    _positive(
+        display["heatmap_max_displacement_m"],
+        "interactive display heatmap_max_displacement_m",
+    )
+
+
 def load_run_config(path: str | Path) -> dict[str, Any]:
     experiment_path = Path(path).resolve()
-    experiment = _read_json(experiment_path)
+    experiment = _prepare_interactive_compatibility(_read_json(experiment_path))
     _schema_version(experiment, "experiment config")
     _require(
         experiment,
@@ -246,6 +510,7 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
     # Validate before indexing nested values for path resolution so malformed
     # user configs always raise ConfigError instead of raw KeyError/TypeError.
     validate_run_config(resolved)
+    _validate_interactive_config(resolved)
 
     if resolved["indenter"]["type"] == "rigid_stl":
         resolved["indenter"]["stl"] = _resolve_path(
@@ -263,6 +528,15 @@ def load_run_config(path: str | Path) -> dict[str, Any]:
             experiment_path.parent,
             resolved["video"]["path"],
             "video path",
+        )
+    if resolved.get("mode") == "interactive_manual" and resolved["probe"]["type"] in {
+        "rounded_block",
+        "custom_rigid_stl",
+    }:
+        resolved["probe"]["mesh"] = _resolve_path(
+            experiment_path.parent,
+            resolved["probe"]["mesh"],
+            "probe mesh",
         )
     return resolved
 

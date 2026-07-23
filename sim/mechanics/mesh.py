@@ -27,6 +27,9 @@ class SurfaceReport:
     bounds_max_m: list[float]
     dimensions_m: list[float]
     area_m2: float
+    enclosed_volume_m3: float
+    finite_coordinates: bool
+    positive_enclosed_volume: bool
     watertight: bool
     manifold: bool
     winding_consistent: bool
@@ -121,13 +124,14 @@ def _component_count(vertex_count: int, edges: np.ndarray) -> int:
     return len({find(int(index)) for index in used})
 
 
-def validate_surface(
+def inspect_surface(
     vertices: np.ndarray,
     faces: np.ndarray,
     *,
     area_epsilon_m2: float = 1.0e-16,
-    require_single_component: bool = True,
 ) -> SurfaceReport:
+    """Return surface diagnostics without repairing or rejecting the mesh."""
+
     vertices = _as_vertices(vertices)
     faces = _as_indices(faces, 3, len(vertices))
 
@@ -158,7 +162,17 @@ def validate_surface(
 
     bounds_min = np.min(vertices, axis=0)
     bounds_max = np.max(vertices, axis=0)
-    report = SurfaceReport(
+    enclosed_volume = float(
+        np.sum(
+            np.einsum(
+                "ij,ij->i",
+                triangles[:, 0],
+                np.cross(triangles[:, 1], triangles[:, 2]),
+            )
+        )
+        / 6.0
+    )
+    return SurfaceReport(
         vertex_count=len(vertices),
         face_count=len(faces),
         component_count=components,
@@ -171,28 +185,57 @@ def validate_surface(
         bounds_max_m=bounds_max.tolist(),
         dimensions_m=(bounds_max - bounds_min).tolist(),
         area_m2=float(np.sum(areas)),
-        watertight=boundary_count == 0,
+        enclosed_volume_m3=enclosed_volume,
+        finite_coordinates=True,
+        positive_enclosed_volume=enclosed_volume > 0.0,
+        watertight=boundary_count == 0 and nonmanifold_count == 0,
         manifold=boundary_count == 0 and nonmanifold_count == 0,
         winding_consistent=inconsistent_count == 0,
     )
 
+
+def surface_validation_problems(
+    report: SurfaceReport, *, require_single_component: bool = True
+) -> list[str]:
+    """Return every reason a surface is rejected by the mechanics preflight."""
+
     problems: list[str] = []
-    if degenerate_count:
-        problems.append(f"{degenerate_count} degenerate faces")
-    if duplicate_count:
-        problems.append(f"{duplicate_count} duplicate faces")
-    if boundary_count:
-        problems.append(f"{boundary_count} open boundary edges")
-    if nonmanifold_count:
-        problems.append(f"{nonmanifold_count} non-manifold edges")
-    if inconsistent_count:
-        problems.append(f"{inconsistent_count} inconsistently wound shared edges")
-    if require_single_component and components != 1:
-        problems.append(f"{components} disconnected surface components")
+    if report.degenerate_face_count:
+        problems.append(f"{report.degenerate_face_count} degenerate faces")
+    if report.duplicate_face_count:
+        problems.append(f"{report.duplicate_face_count} duplicate faces")
+    if report.boundary_edge_count:
+        problems.append(f"{report.boundary_edge_count} open boundary edges")
+    if report.nonmanifold_edge_count:
+        problems.append(f"{report.nonmanifold_edge_count} non-manifold edges")
+    if not report.winding_consistent:
+        problems.append(
+            f"{report.inconsistent_edge_count} edges have inconsistent face winding"
+        )
+    if require_single_component and report.component_count != 1:
+        problems.append(f"{report.component_count} disconnected surface components")
+    if not report.positive_enclosed_volume:
+        problems.append(
+            "enclosed volume is not positive "
+            f"({report.enclosed_volume_m3:.6g} m^3)"
+        )
+    return problems
+
+
+def validate_surface(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    *,
+    area_epsilon_m2: float = 1.0e-16,
+    require_single_component: bool = True,
+) -> SurfaceReport:
+    report = inspect_surface(vertices, faces, area_epsilon_m2=area_epsilon_m2)
+    problems = surface_validation_problems(
+        report, require_single_component=require_single_component
+    )
     if problems:
         raise AssetValidationError("Invalid STL surface: " + "; ".join(problems))
     return report
-
 
 def tet_signed_volumes(vertices: np.ndarray, tets: np.ndarray) -> np.ndarray:
     vertices = _as_vertices(vertices)

@@ -75,6 +75,61 @@ displacement is exported separately.
 Supported indenters are `sphere`, `flat_plate`, `cylinder`, and `rigid_stl`.
 Plate and cylinder support distances account for their configured orientation.
 
+## Interactive manual deformation
+
+This is a separate launcher; it does not execute the prescribed trajectory:
+
+```powershell
+uv --native-tls run --project sim/newton --extra examples `
+  python sim/scripts/run_interactive_touch.py `
+  --config "sim/config/mechanics/experiments/interactive_manual.json" `
+  --viewer gl
+```
+
+Wait for the console to report that settling is complete, then use:
+
+- **Right mouse drag:** select and move the blue probe.
+- **Shift + right mouse drag:** rotate the selected probe around camera axes.
+- **Space:** pause or resume physics.
+- **R:** reset the probe and fingertip to the settled state.
+- **B:** make the current deformation the new displacement baseline.
+- **C:** save `interactive_state_XXXXX.npz` in the configured output directory.
+- **Esc** or window close: exit.
+
+The rounded-block probe starts clear of the fingertip and is the only movable
+body. Mouse input changes a target transform; configurable speed and per-frame
+limits move the actual kinematic probe toward it. The viewer does not apply its
+picking spring. Live UI/console diagnostics report displacement, the estimated
+world-space contact-force vector and magnitude, approximate area, probe pose,
+minimum relative tet volume, active contacts, and contact-buffer use. These
+forces remain penalty-model estimates and are not calibrated measurements.
+
+Manual motion is transactionally safety-checked. Each candidate substep is
+simulated into Newton's alternate state buffer; the controller swaps it into
+the accepted state only when it passes the configured limits. Free-space,
+near-contact, and contact speeds default to 25, 5, and 1.5 mm/s respectively.
+
+The legacy asset limits **commanded indentation** to 0.75 mm. This quantity is
+the probe support point commanded beyond the configured contact reference; it
+is not a claim of literal rigid-object penetration. The default tet-volume
+warning and recoverable-stop thresholds are `J=0.30` and `J=0.20`. The existing
+`J < 0.15` fatal circuit breaker remains unchanged.
+
+On a recoverable stop, the candidate state is discarded, the mouse target
+returns to the last safe probe pose, and further inward movement is blocked.
+The viewer remains open: drag outward to retract or press **R**. Diagnostics
+are saved as `safety_stop_XXXXX.npz`, including the safety reason, minimum J,
+affected tet IDs, candidate/last-safe probe poses, estimated force, and
+commanded indentation. `display.show_safety_tets` highlights affected tet
+edges; `display.show_mount_vertices` optionally shows the fixed mount region.
+
+The default probe is `sim/assets/probes/rounded_block.stl`. The same `probe`
+section also accepts `capsule`, `cylinder`, `sphere`, or
+`custom_rigid_stl`. The interactive configuration reuses the normal
+asset/material/solver/contact/equilibration schema; its generated compatibility
+trajectory is used only while building the shared Newton model and is never
+advanced by the interactive controller.
+
 ## Record an MP4
 
 The `video` section is optional and disabled by default. To record through

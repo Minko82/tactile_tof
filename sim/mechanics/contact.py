@@ -17,6 +17,7 @@ class ContactSummary:
     particle_forces_n: np.ndarray
     estimated_axial_reaction_n: float
     estimated_transverse_reaction_n: np.ndarray
+    estimated_world_reaction_n: np.ndarray
     estimated_tangential_relative_velocity_m_s: np.ndarray
 
     @property
@@ -72,6 +73,7 @@ def estimate_contact_summary(
             particle_forces_n=np.zeros((0, 3), dtype=np.float64),
             estimated_axial_reaction_n=0.0,
             estimated_transverse_reaction_n=np.zeros(3, dtype=np.float64),
+            estimated_world_reaction_n=np.zeros(3, dtype=np.float64),
             estimated_tangential_relative_velocity_m_s=np.zeros(3, dtype=np.float64),
         )
     positions = np.asarray(particle_positions_m, dtype=np.float64)[particles]
@@ -120,6 +122,7 @@ def estimate_contact_summary(
             particle_forces_n=np.zeros((0, 3), dtype=np.float64),
             estimated_axial_reaction_n=0.0,
             estimated_transverse_reaction_n=np.zeros(3, dtype=np.float64),
+            estimated_world_reaction_n=np.zeros(3, dtype=np.float64),
             estimated_tangential_relative_velocity_m_s=np.zeros(3, dtype=np.float64),
         )
     direction = np.asarray(loading_direction, dtype=np.float64)
@@ -136,6 +139,7 @@ def estimate_contact_summary(
         particle_forces_n=forces[active],
         estimated_axial_reaction_n=axial,
         estimated_transverse_reaction_n=tangential,
+        estimated_world_reaction_n=total,
         estimated_tangential_relative_velocity_m_s=slip,
     )
 

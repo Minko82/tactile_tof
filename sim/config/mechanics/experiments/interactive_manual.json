@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "experiment_id": "interactive_manual_rounded_block",
+  "mode": "interactive_manual",
+  "asset_config": "../assets/legacy_fingertip.json",
+  "material_config": "../materials/ecoflex_00_30.json",
+  "fingertip_transform": {
+    "position_m": [0.0, 0.0, 0.0],
+    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+    "scale": 0.01
+  },
+  "contact": {
+    "location_m": [-0.00889358, -0.00108855, 0.019684070719499],
+    "direction": [0.0, 0.0, -1.0]
+  },
+  "probe": {
+    "type": "rounded_block",
+    "mesh": "../../../assets/probes/rounded_block.stl",
+    "scale_to_m": 0.001,
+    "dimensions_m": [0.025, 0.018, 0.012],
+    "initial_position_m": [-0.00889358, -0.00108855, 0.035684070719499],
+    "initial_orientation_wxyz": [1.0, 0.0, 0.0, 0.0],
+    "color_rgb": [0.1, 0.3, 1.0]
+  },
+  "manual_control": {
+    "max_linear_speed_m_s": 0.025,
+    "free_space_linear_speed_m_s": 0.025,
+    "near_contact_linear_speed_m_s": 0.005,
+    "contact_linear_speed_m_s": 0.0015,
+    "near_contact_distance_m": 0.002,
+    "max_angular_speed_deg_s": 90.0,
+    "max_translation_per_frame_m": 0.001,
+    "max_rotation_per_frame_deg": 3.0,
+    "rotation_sensitivity_deg_per_pixel": 0.5,
+    "safety": {
+      "warning_minimum_relative_tet_volume": 0.3,
+      "stop_minimum_relative_tet_volume": 0.2,
+      "warning_estimated_force_n": 1.0,
+      "stop_estimated_force_n": 2.0,
+      "warning_commanded_indentation_m": 0.0006,
+      "retraction_clearance_m": 0.00005
+    },
+    "reset_key": "R",
+    "baseline_key": "B",
+    "capture_key": "C"
+  },
+  "display": {
+    "show_contacts": true,
+    "show_metrics": true,
+    "displacement_heatmap": true,
+    "metrics_rate_hz": 10.0,
+    "show_safety_tets": true,
+    "show_mount_vertices": false,
+    "heatmap_max_displacement_m": 0.003
+  },
+  "equilibration": {
+    "minimum_duration_s": 0.5,
+    "maximum_duration_s": 3.0,
+    "velocity_tolerance_m_s": 0.00001,
+    "stable_frames": 10,
+    "timeout_behavior": "warn"
+  },
+  "solver": {
+    "deterministic": false,
+    "newton_strict": false,
+    "simulation_fps": 60,
+    "substeps": 20,
+    "vbd_iterations": 15,
+    "gravity_m_s2": -9.81,
+    "particle_radius_edge_fraction": 0.35,
+    "particle_enable_self_contact": false,
+    "particle_enable_tile_solve": true,
+    "particle_collision_detection_interval": -1,
+    "rigid_body_particle_contact_buffer_size": 512
+  },
+  "contact_parameters": {
+    "normal_stiffness": 10000.0,
+    "normal_damping": 0.0001,
+    "damping_semantics": "stiffness_relative_dimensionless",
+    "static_friction": 0.0,
+    "dynamic_friction": 0.0,
+    "margin_m": 0.0005,
+    "force_threshold_n": 0.000001,
+    "friction_epsilon_m_s": 0.00001,
+    "face_mask_radius_multiplier": 2.0
+  },
+  "monitoring": {
+    "nominal_wall_thickness_m": 0.003,
+    "engineering_strain_limit": 0.3,
+    "minimum_rest_tet_volume_m3": 1e-18,
+    "minimum_rest_tet_quality": 0.01,
+    "maximum_rest_tet_condition_number": 100.0,
+    "minimum_relative_tet_volume": 0.15,
+    "tet_check_interval_substeps": 5
+  },
+  "output": {
+    "directory": "../../../output/mechanics/interactive_manual",
+    "chunk_size_frames": 300,
+    "rate_hz": 10.0
+  },
+  "viewer": {
+    "camera": {
+      "position_m": [0.05, 0.05, 0.04],
+      "yaw_degrees": -135.0,
+      "pitch_degrees": -12.0
+    },
+    "render_contacts": true
+  }
+}

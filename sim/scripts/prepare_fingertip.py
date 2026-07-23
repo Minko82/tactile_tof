@@ -19,19 +19,18 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from sim.mechanics.mapping import build_surface_mapping
 from sim.mechanics.mesh import (
     AssetValidationError,
+    inspect_surface,
+    surface_validation_problems,
     validate_dimensions,
     validate_surface,
     validate_tets,
     weld_stl_vertices,
 )
-from sim.mechanics.meshing import tetrahedralize_gmsh
-from sim.mechanics.regions import select_regions
 
 
-UNIT_TO_METERS = {"mm": 1.0e-3, "cm": 1.0e-2, "m": 1.0}
+UNIT_TO_METERS = {"mm": 1.0e-3, "cm": 1.0e-2, "inch": 0.0254, "m": 1.0}
 DELIVERABLES = (
     "surface.stl",
     "volume.msh",
@@ -77,7 +76,59 @@ def _write_surface(path: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
     mesh.export(path, file_type="stl")
 
 
+def validate_only(args: argparse.Namespace) -> Path | None:
+    """Run the same surface gate used by full fingertip preparation."""
+
+    source = Path(args.stl).resolve()
+    if not source.is_file():
+        raise AssetValidationError(f"STL does not exist: {source}")
+    raw_vertices, raw_faces = _load_stl(source)
+    welded_vertices, faces = weld_stl_vertices(
+        raw_vertices, raw_faces, decimal_digits=7
+    )
+    report = inspect_surface(welded_vertices * UNIT_TO_METERS[args.units], faces)
+    failures = surface_validation_problems(report, require_single_component=True)
+    payload = {
+        "schema_version": 1,
+        "validator": "tactile_tof.prepare_fingertip",
+        "status": "FAIL" if failures else "PASS",
+        "message": (
+            "Not accepted by the simulation preflight validator."
+            if failures
+            else "Accepted by the simulation preflight validator."
+        ),
+        "source_stl": str(source),
+        "source_units": args.units,
+        "surface": report.to_dict(),
+        "failures": failures,
+    }
+    report_path = Path(args.report_json).resolve() if args.report_json else None
+    if report_path is not None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    if failures:
+        raise AssetValidationError("Invalid STL surface: " + "; ".join(failures))
+    print("Accepted by the simulation preflight validator.")
+    return report_path
+
 def prepare_asset(args: argparse.Namespace) -> Path:
+    missing_arguments = [
+        name
+        for name in ("regions_config", "output_dir", "target_edge_mm")
+        if getattr(args, name) is None
+    ]
+    if missing_arguments:
+        raise AssetValidationError(
+            "full preparation requires: "
+            + ", ".join("--" + name.replace("_", "-") for name in missing_arguments)
+        )
+
+    from sim.mechanics.mapping import build_surface_mapping
+    from sim.mechanics.meshing import tetrahedralize_gmsh
+    from sim.mechanics.regions import select_regions
+
     source = Path(args.stl).resolve()
     regions_path = Path(args.regions_config).resolve()
     output_dir = Path(args.output_dir).resolve()
@@ -258,9 +309,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--stl", required=True, help="positive hollow silicone body STL"
     )
     parser.add_argument("--units", required=True, choices=tuple(UNIT_TO_METERS))
-    parser.add_argument("--target-edge-mm", required=True, type=float)
-    parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--regions-config", required=True)
+    parser.add_argument("--target-edge-mm", type=float)
+    parser.add_argument("--output-dir")
+    parser.add_argument("--regions-config")
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="run only the simulation surface preflight; do not tetrahedralize",
+    )
+    parser.add_argument(
+        "--report-json",
+        help="write the validate-only result as JSON, including failures",
+    )
     parser.add_argument(
         "--force",
         action="store_true",
@@ -271,7 +331,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     try:
-        prepare_asset(build_parser().parse_args())
+        args = build_parser().parse_args()
+        if args.validate_only:
+            validate_only(args)
+        else:
+            prepare_asset(args)
     except (AssetValidationError, RuntimeError) as exc:
         print(f"prepare_fingertip: error: {exc}", file=sys.stderr)
         return 2

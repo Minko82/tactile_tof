@@ -7,5 +7,8 @@
   "volume_msh": "../../../assets/fingertip/fingertip_tet_.msh",
   "regions_npz": "../../../assets/fingertip/mechanics_regions.npz",
   "surface_mapping_npz": "../../../assets/fingertip/mechanics_surface_mapping.npz",
+  "interactive_safety": {
+    "maximum_commanded_indentation_m": 0.00075
+  },
   "notes": "Compatibility asset for the original sphere experiment. Prepare new hollow fingertips with prepare_fingertip.py instead."
 }

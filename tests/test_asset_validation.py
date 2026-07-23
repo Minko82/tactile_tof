@@ -6,6 +6,7 @@ import numpy as np
 from sim.mechanics.mesh import (
     AssetValidationError,
     boundary_faces,
+    inspect_surface,
     validate_surface,
     validate_tets,
     weld_stl_vertices,
@@ -38,6 +39,15 @@ class AssetValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(AssetValidationError, "open boundary edges"):
             validate_surface(self.vertices, self.faces[:-1])
 
+    def test_inconsistent_surface_winding_is_rejected(self):
+        faces = self.faces.copy()
+        faces[0] = faces[0, ::-1]
+        report = inspect_surface(self.vertices, faces)
+        self.assertFalse(report.winding_consistent)
+        with self.assertRaisesRegex(
+            AssetValidationError, "edges have inconsistent face winding"
+        ):
+            validate_surface(self.vertices, faces)
     def test_invalid_two_body_mold_fixture_is_rejected(self):
         try:
             import trimesh

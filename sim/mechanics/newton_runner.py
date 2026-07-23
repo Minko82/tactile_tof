@@ -450,12 +450,19 @@ class TouchMechanicsControllerV2:
             f"mount_vertices={len(self.mount_vertices)} "
             f"particle_radius={self.particle_radius * 1000:.3f} mm"
         )
-        print(
-            f"[mechanics] trajectory=prescribed_repeatable duration="
-            f"{self.trajectory.total_duration_s:.3f} s; settling before contact "
-            f"for {self.equilibration_config['minimum_duration_s']}-"
-            f"{self.equilibration_config['maximum_duration_s']} s"
-        )
+        if self.config.get("mode") == "interactive_manual":
+            print(
+                "[mechanics] mode=interactive_manual trajectory=disabled; "
+                f"settling for {self.equilibration_config['minimum_duration_s']}-"
+                f"{self.equilibration_config['maximum_duration_s']} s"
+            )
+        else:
+            print(
+                f"[mechanics] trajectory=prescribed_repeatable duration="
+                f"{self.trajectory.total_duration_s:.3f} s; settling before contact "
+                f"for {self.equilibration_config['minimum_duration_s']}-"
+                f"{self.equilibration_config['maximum_duration_s']} s"
+            )
         self._export_frame(0.0, "initialization")
 
     def _configure_video(self, args: Any) -> None:
